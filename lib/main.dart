@@ -263,7 +263,6 @@ class _SettingsPageState extends State<SettingsPage> {
     super.dispose();
   }
 
-  // ignore: unused_element — wired into _save in Task 5.
   SmbSettings _formSettings() => SmbSettings(
         host: _host.text.trim(),
         sharePath: _sharePath.text.trim(),
@@ -271,6 +270,65 @@ class _SettingsPageState extends State<SettingsPage> {
         username: _username.text.trim(),
         password: _password.text,
       );
+
+  bool _testing = false;
+  int? _testCount;
+  String? _testError;
+
+  Future<void> _testConnection() async {
+    final s = _formSettings();
+    if (s.username.isEmpty) {
+      setState(() {
+        _testing = false;
+        _testCount = null;
+        _testError = SmbNotConfiguredException.message;
+      });
+      return;
+    }
+    setState(() {
+      _testing = true;
+      _testCount = null;
+      _testError = null;
+    });
+    try {
+      final conn = await connect(s);
+      try {
+        final folder = await conn.file(s.sharePath);
+        final entries = await conn.listFiles(folder);
+        if (!mounted) return;
+        setState(() {
+          _testing = false;
+          _testCount = entries.length;
+        });
+      } finally {
+        await conn.close();
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _testing = false;
+          _testError = e.toString();
+        });
+      }
+    }
+  }
+
+  Future<void> _save() async {
+    if (!(_formKey.currentState?.validate() ?? false)) return;
+    final s = _formSettings();
+    try {
+      await s.save(store: widget.store);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not save settings')),
+        );
+      }
+      return; // stay on the page
+    }
+    widget.settingsNotifier.value = s;
+    if (mounted) Navigator.of(context).pop(true);
+  }
 
   String? _required(String? v) =>
       (v ?? '').trim().isEmpty ? 'Required' : null;
@@ -335,19 +393,23 @@ class _SettingsPageState extends State<SettingsPage> {
                 obscureText: _obscured,
               ),
               const SizedBox(height: 16),
-              // Test result area + buttons — wired in Task 5.
+              if (_testError != null)
+                Text(_testError!,
+                    style: TextStyle(
+                        color: Theme.of(context).colorScheme.error)),
+              if (_testCount != null)
+                Text('Connected — $_testCount files in ${_sharePath.text.trim()}'),
               const SizedBox(height: 8),
               Row(
                 children: [
                   OutlinedButton(
-                    onPressed: null, // Task 5
-                    child: const Text('Test connection'),
+                    onPressed: _testing ? null : _testConnection,
+                    child: Text(_testing ? 'Testing…' : 'Test connection'),
                   ),
                   const SizedBox(width: 8),
                   FilledButton(
-                    onPressed: null, // Task 5
-                    child: const Text('Save'),
-                  ),
+                      onPressed: _testing ? null : _save,
+                      child: const Text('Save')),
                 ],
               ),
             ],

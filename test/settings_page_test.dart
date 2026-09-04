@@ -48,4 +48,64 @@ void main() {
       isFalse,
     );
   });
+
+  testWidgets('share path without leading slash is rejected', (tester) async {
+    final notifier = ValueNotifier(SmbSettings.defaults);
+    await _openSettings(
+        tester, SettingsPage(settingsNotifier: notifier, store: InMemorySettingsStore()));
+    await tester.enterText(find.byKey(const Key('share_path_field')), 'zdrive/x');
+    await tester.tap(find.text('Save'));
+    await tester.pump();
+    expect(find.text('Must start with / (share/sub-folder)'), findsOneWidget);
+    expect(find.byType(SettingsPage), findsOneWidget); // did not pop
+  });
+
+  testWidgets('empty username is rejected', (tester) async {
+    final notifier = ValueNotifier(SmbSettings.defaults);
+    await _openSettings(
+        tester, SettingsPage(settingsNotifier: notifier, store: InMemorySettingsStore()));
+    await tester.enterText(find.byKey(const Key('username_field')), '');
+    await tester.tap(find.text('Save'));
+    await tester.pump();
+    expect(find.text('Required'), findsAtLeastNWidgets(1));
+    expect(find.byType(SettingsPage), findsOneWidget); // did not pop
+  });
+
+  testWidgets('save persists, updates notifier, and pops', (tester) async {
+    final store = InMemorySettingsStore();
+    final notifier = ValueNotifier(SmbSettings.defaults);
+    await _openSettings(tester,
+        SettingsPage(settingsNotifier: notifier, store: store));
+    await tester.enterText(find.byKey(const Key('username_field')), 'opk');
+    await tester.enterText(find.byKey(const Key('password_field')), 'pw');
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect(find.byType(SettingsPage), findsNothing); // popped
+    expect(notifier.value.username, 'opk');
+    expect(store.data['smb.username'], 'opk');
+    expect(store.data['smb.password'], 'pw');
+  });
+
+  testWidgets('blank password is allowed', (tester) async {
+    final store = InMemorySettingsStore();
+    final notifier = ValueNotifier(SmbSettings.defaults);
+    await _openSettings(tester,
+        SettingsPage(settingsNotifier: notifier, store: store));
+    await tester.enterText(find.byKey(const Key('username_field')), 'opk');
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect(find.byType(SettingsPage), findsNothing);
+    expect(store.data['smb.password'], '');
+  });
+
+  testWidgets('test connection shows guard wording when unconfigured',
+      (tester) async {
+    final notifier = ValueNotifier(SmbSettings.defaults);
+    await _openSettings(
+        tester, SettingsPage(settingsNotifier: notifier, store: InMemorySettingsStore()));
+    await tester.enterText(find.byKey(const Key('host_field')), '10.9.9.9');
+    await tester.tap(find.text('Test connection'));
+    await tester.pump();
+    expect(find.text(SmbNotConfiguredException.message), findsOneWidget);
+  });
 }
