@@ -155,7 +155,9 @@ void main() {
 }
 
 class MmcPicApp extends StatelessWidget {
-  const MmcPicApp({super.key});
+  const MmcPicApp({super.key, this.store = const SecureSettingsStore()});
+
+  final SettingsStore store;
 
   @override
   Widget build(BuildContext context) {
@@ -167,7 +169,7 @@ class MmcPicApp extends StatelessWidget {
           brightness: Brightness.dark,
         ),
       ),
-      home: const HomePage(),
+      home: HomePage(store: store),
     );
   }
 }
@@ -175,26 +177,84 @@ class MmcPicApp extends StatelessWidget {
 /// Root shell — Scan / History tabs along the bottom.
 /// (camera, review) is pushed on top of this shell as process progresses.
 class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+  const HomePage({super.key, this.store = const SecureSettingsStore()});
+
+  final SettingsStore store;
 
   @override
   State<HomePage> createState() => _HomePageState();
 }
 
 class _HomePageState extends State<HomePage> {
+  late final SettingsStore _store;
+  final ValueNotifier<SmbSettings> _settingsNotifier =
+      ValueNotifier(SmbSettings.defaults);
+
   int _tab = 0;
   bool _historyVisited = false;
 
   @override
+  void initState() {
+    super.initState();
+    _store = widget.store;
+    unawaited(_loadSettings());
+  }
+
+  Future<void> _loadSettings() async {
+    final s = await SmbSettings.load(store: _store); // recovery inside load()
+    if (!mounted) return;
+    _settingsNotifier.value = s;
+    if (s.username.isEmpty) {
+      // First-run gate — push once the frame is up.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _openSettings(firstRun: true);
+      });
+    }
+  }
+
+  void _openSettings({bool firstRun = false}) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => SettingsPage(
+          settingsNotifier: _settingsNotifier,
+          firstRun: firstRun,
+          store: _store,
+        ),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _settingsNotifier.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: IndexedStack(
-        index: _tab,
-        children: [
-          ScannerPage(paused: _tab != 0),
-          // Build the history tab lazily
-          _historyVisited ? const HistoryPage() : const SizedBox.shrink(),
-        ],
+      body: ValueListenableBuilder<SmbSettings>(
+        valueListenable: _settingsNotifier,
+        builder: (context, settings, _) => IndexedStack(
+          index: _tab,
+          children: [
+            ScannerPage(
+              paused: _tab != 0,
+              settingsNotifier: _settingsNotifier,
+              onOpenSettings: () => _openSettings(),
+            ),
+            // Re-key on settings value: remount → initState → fresh list.
+            _historyVisited
+                ? KeyedSubtree(
+                    key: ObjectKey(settings),
+                    child: HistoryPage(
+                      settingsNotifier: _settingsNotifier,
+                      onOpenSettings: () => _openSettings(),
+                    ),
+                  )
+                : const SizedBox.shrink(),
+          ],
+        ),
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tab,
@@ -422,7 +482,15 @@ class _SettingsPageState extends State<SettingsPage> {
 
 /// Stage 1 — scan the QR code
 class ScannerPage extends StatefulWidget {
-  const ScannerPage({super.key, this.paused = false});
+  const ScannerPage({
+    super.key,
+    required this.settingsNotifier,
+    this.onOpenSettings,
+    this.paused = false,
+  });
+
+  final ValueNotifier<SmbSettings> settingsNotifier;
+  final VoidCallback? onOpenSettings;
 
   /// True while another tab is on top — pauses the camera.
   final bool paused;
@@ -497,7 +565,12 @@ class _ScannerPageState extends State<ScannerPage> {
     await _controller.stop();
     if (!mounted) return;
     await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => CameraPage(orderNumber: orderNumber)),
+      MaterialPageRoute(
+        builder: (_) => CameraPage(
+          orderNumber: orderNumber,
+          settingsNotifier: widget.settingsNotifier,
+        ),
+      ),
     );
     if (!mounted) return;
     _processing = false;
@@ -567,6 +640,13 @@ class _ScannerPageState extends State<ScannerPage> {
         title: const Text('Scan QR code'),
         backgroundColor: Colors.black,
         foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings),
+            tooltip: 'SMB settings',
+            onPressed: widget.onOpenSettings,
+          ),
+        ],
       ),
       body: Stack(
         children: [
@@ -605,9 +685,14 @@ class _ScannerPageState extends State<ScannerPage> {
 /// user gets the full native camera experience (zoom, flash, timer,
 /// portrait and landscape, etc.).
 class CameraPage extends StatefulWidget {
-  const CameraPage({super.key, required this.orderNumber});
+  const CameraPage({
+    super.key,
+    required this.orderNumber,
+    required this.settingsNotifier,
+  });
 
   final String orderNumber;
+  final ValueNotifier<SmbSettings> settingsNotifier;
 
   @override
   State<CameraPage> createState() => _CameraPageState();
@@ -640,6 +725,7 @@ class _CameraPageState extends State<CameraPage> {
             builder: (_) => PreviewPage(
               orderNumber: widget.orderNumber,
               imagePath: photo.path,
+              settingsNotifier: widget.settingsNotifier,
             ),
           ),
         );
@@ -719,10 +805,12 @@ class PreviewPage extends StatefulWidget {
     super.key,
     required this.orderNumber,
     required this.imagePath,
+    required this.settingsNotifier,
   });
 
   final String orderNumber;
   final String imagePath;
+  final ValueNotifier<SmbSettings> settingsNotifier;
 
   @override
   State<PreviewPage> createState() => _PreviewPageState();
@@ -756,17 +844,17 @@ class _PreviewPageState extends State<PreviewPage> {
     });
 
     try {
+      final s = widget.settingsNotifier.value;
       final bytes = await File(widget.imagePath).readAsBytes();
-      final conn = await connect(SmbSettings.defaults);
+      final conn = await connect(s);
       try {
         // The share itself must already exist; sub-folders are created here.
         try {
-          await conn.createFolder(SmbSettings.defaults.sharePath);
+          await conn.createFolder(s.sharePath);
         } catch (_) {
           // Folder already exists (or deeper nesting is missing) — ignore.
         }
-        final remoteFile =
-            await conn.createFile('${SmbSettings.defaults.sharePath}/$fileName');
+        final remoteFile = await conn.createFile('${s.sharePath}/$fileName');
         final sink = await conn.openWrite(remoteFile);
         sink.add(bytes);
         await sink.flush();
@@ -800,7 +888,10 @@ class _PreviewPageState extends State<PreviewPage> {
   void _takeAnotherPhoto() {
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(
-        builder: (_) => CameraPage(orderNumber: widget.orderNumber),
+        builder: (_) => CameraPage(
+          orderNumber: widget.orderNumber,
+          settingsNotifier: widget.settingsNotifier,
+        ),
       ),
     );
   }
@@ -993,7 +1084,14 @@ class _PreviewPageState extends State<PreviewPage> {
 /// History tab — lists the image files currently on the SMB share.
 /// Tapping one downloads and displays it full-screen.
 class HistoryPage extends StatefulWidget {
-  const HistoryPage({super.key});
+  const HistoryPage({
+    super.key,
+    required this.settingsNotifier,
+    this.onOpenSettings,
+  });
+
+  final ValueNotifier<SmbSettings> settingsNotifier;
+  final VoidCallback? onOpenSettings;
 
   @override
   State<HistoryPage> createState() => _HistoryPageState();
@@ -1003,6 +1101,9 @@ class _HistoryPageState extends State<HistoryPage> {
   List<SmbFile>? _files;
   String? _error;
 
+  /// Settings snapshot the failed refresh used (shown in the error view).
+  SmbSettings? _errorSettings;
+
   @override
   void initState() {
     super.initState();
@@ -1010,10 +1111,11 @@ class _HistoryPageState extends State<HistoryPage> {
   }
 
   Future<void> _refresh() async {
+    final s = widget.settingsNotifier.value;
     try {
-      final conn = await connect(SmbSettings.defaults);
+      final conn = await connect(s);
       try {
-        final folder = await conn.file(SmbSettings.defaults.sharePath);
+        final folder = await conn.file(s.sharePath);
         final entries = await conn.listFiles(folder);
         // Names encode the capture time, so descending name order is
         // newest-first.
@@ -1022,12 +1124,18 @@ class _HistoryPageState extends State<HistoryPage> {
         setState(() {
           _files = entries.where((f) => _isImage(f.name)).toList();
           _error = null;
+          _errorSettings = null;
         });
       } finally {
         await conn.close();
       }
     } catch (e) {
-      if (mounted) setState(() => _error = e.toString());
+      if (mounted) {
+        setState(() {
+          _error = e.toString();
+          _errorSettings = s;
+        });
+      }
     }
   }
 
@@ -1068,7 +1176,16 @@ class _HistoryPageState extends State<HistoryPage> {
   Widget build(BuildContext context) {
     final files = _files;
     return Scaffold(
-      appBar: AppBar(title: const Text('History')),
+      appBar: AppBar(
+        title: const Text('History'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings),
+            tooltip: 'SMB settings',
+            onPressed: widget.onOpenSettings,
+          ),
+        ],
+      ),
       body: _error != null
           ? _errorView()
           : files == null
@@ -1089,7 +1206,10 @@ class _HistoryPageState extends State<HistoryPage> {
                     trailing: Text(_formatSize(file.size)),
                     onTap: () => Navigator.of(context).push(
                       MaterialPageRoute(
-                        builder: (_) => ImageViewerPage(file: file),
+                        builder: (_) => ImageViewerPage(
+                          file: file,
+                          settingsNotifier: widget.settingsNotifier,
+                        ),
                       ),
                     ),
                   );
@@ -1107,7 +1227,7 @@ class _HistoryPageState extends State<HistoryPage> {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              'Could not list \\\\${SmbSettings.defaults.host}${SmbSettings.defaults.sharePath}\n\n$_error',
+              'Could not list \\\\${_errorSettings?.host ?? SmbSettings.defaults.host}${_errorSettings?.sharePath ?? SmbSettings.defaults.sharePath}\n\n$_error',
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 16),
@@ -1125,9 +1245,14 @@ class _HistoryPageState extends State<HistoryPage> {
 
 /// Full-screen viewer for one image on the SMB share (pinch to zoom).
 class ImageViewerPage extends StatefulWidget {
-  const ImageViewerPage({super.key, required this.file});
+  const ImageViewerPage({
+    super.key,
+    required this.file,
+    required this.settingsNotifier,
+  });
 
   final SmbFile file;
+  final ValueNotifier<SmbSettings> settingsNotifier;
 
   @override
   State<ImageViewerPage> createState() => _ImageViewerPageState();
@@ -1144,8 +1269,9 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   }
 
   Future<void> _load() async {
+    final s = widget.settingsNotifier.value;
     try {
-      final conn = await connect(SmbSettings.defaults);
+      final conn = await connect(s);
       try {
         final stream = await conn.openRead(widget.file);
         // copy: true is required — smb_connect's openRead reuses one buffer
