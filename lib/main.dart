@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -152,6 +153,75 @@ class _ScannerPageState extends State<ScannerPage> {
     }
   }
 
+  /// Stop scanning, run the capture flow for [orderNumber], then resume
+  /// scanning when it finishes. Shared by the QR and manual entry paths.
+  Future<void> _startCapture(String orderNumber) async {
+    await _controller.stop();
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => CameraPage(orderNumber: orderNumber)),
+    );
+    if (!mounted) return;
+    _processing = false;
+    unawaited(_controller.start());
+  }
+
+  /// Fallback entry: type an order number when the QR code won't scan.
+  /// `_processing` suppresses barcode detection while the dialog is open;
+  /// confirming starts the same capture flow a scanned code does.
+  Future<void> _showEntryDialog() async {
+    if (_processing) return;
+    _processing = true;
+    final controller = TextEditingController();
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Type order number'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          keyboardType: TextInputType.number,
+          // Digits-only input keeps the upload filename contract safe by
+          // construction — '_' and SMB-hostile characters are untypable,
+          // including via paste (formatters run on pasted text too).
+          inputFormatters: [
+            FilteringTextInputFormatter.digitsOnly,
+            LengthLimitingTextInputFormatter(16),
+          ],
+          decoration: const InputDecoration(hintText: 'Order number'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          ValueListenableBuilder<TextEditingValue>(
+            valueListenable: controller,
+            builder: (context, value, _) => FilledButton(
+              // Disabled while the trimmed value is empty.
+              onPressed: value.text.trim().isEmpty
+                  ? null
+                  : () => Navigator.of(context).pop(true),
+              child: const Text('Use this'),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    final orderNumber = controller.text.trim();
+    controller.dispose();
+
+    if (!mounted) return;
+    if (confirmed == true && orderNumber.isNotEmpty) {
+      await _startCapture(orderNumber);
+    } else {
+      // Cancelled — nothing was pushed, just resume detecting.
+      _processing = false;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -161,18 +231,34 @@ class _ScannerPageState extends State<ScannerPage> {
         backgroundColor: Colors.black,
         foregroundColor: Colors.white,
       ),
-      body: MobileScanner(
-        controller: _controller,
-        onDetect: _onDetect,
-        errorBuilder: (context, error) => Center(
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Text(
-              'Camera error: ${error.errorCode.name}',
-              style: const TextStyle(color: Colors.white),
+      body: Stack(
+        children: [
+          MobileScanner(
+            controller: _controller,
+            onDetect: _onDetect,
+            errorBuilder: (context, error) => Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Text(
+                  'Camera error: ${error.errorCode.name}',
+                  style: const TextStyle(color: Colors.white),
+                ),
+              ),
             ),
           ),
-        ),
+          // Fallback for a missing or damaged QR code — always visible so
+          // it's findable after a failed scan attempt.
+          Positioned(
+            left: 16,
+            right: 16,
+            bottom: 16,
+            child: FilledButton.tonalIcon(
+              icon: const Icon(Icons.keyboard),
+              label: const Text('Type order number'),
+              onPressed: _showEntryDialog,
+            ),
+          ),
+        ],
       ),
     );
   }
