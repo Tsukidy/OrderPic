@@ -128,6 +128,28 @@ class SecureSettingsStore implements SettingsStore {
   Future<void> delete(String key) => _storage.delete(key: key);
 }
 
+/// Thrown (before any network dial) when an SMB operation is attempted
+/// with no configured login. toString() is shown verbatim in error
+/// banners, so it must stay user-readable.
+class SmbNotConfiguredException implements Exception {
+  static const String message = 'SMB login not configured — open Settings';
+
+  @override
+  String toString() => message;
+}
+
+/// Opens an SMB connection with [s]. Every operation goes through here so
+/// the unconfigured guard and settings snapshot live in one place.
+Future<SmbConnect> connect(SmbSettings s) async {
+  if (s.username.isEmpty) throw SmbNotConfiguredException();
+  return SmbConnect.connectAuth(
+    host: s.host,
+    domain: s.domain,
+    username: s.username,
+    password: s.password,
+  );
+}
+
 void main() {
   runApp(const MmcPicApp());
 }
@@ -529,12 +551,7 @@ class _PreviewPageState extends State<PreviewPage> {
 
     try {
       final bytes = await File(widget.imagePath).readAsBytes();
-      final conn = await SmbConnect.connectAuth(
-        host: SmbSettings.defaults.host,
-        domain: SmbSettings.defaults.domain,
-        username: SmbSettings.defaults.username,
-        password: SmbSettings.defaults.password,
-      );
+      final conn = await connect(SmbSettings.defaults);
       try {
         // The share itself must already exist; sub-folders are created here.
         try {
@@ -788,12 +805,7 @@ class _HistoryPageState extends State<HistoryPage> {
 
   Future<void> _refresh() async {
     try {
-      final conn = await SmbConnect.connectAuth(
-        host: SmbSettings.defaults.host,
-        domain: SmbSettings.defaults.domain,
-        username: SmbSettings.defaults.username,
-        password: SmbSettings.defaults.password,
-      );
+      final conn = await connect(SmbSettings.defaults);
       try {
         final folder = await conn.file(SmbSettings.defaults.sharePath);
         final entries = await conn.listFiles(folder);
@@ -927,12 +939,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
 
   Future<void> _load() async {
     try {
-      final conn = await SmbConnect.connectAuth(
-        host: SmbSettings.defaults.host,
-        domain: SmbSettings.defaults.domain,
-        username: SmbSettings.defaults.username,
-        password: SmbSettings.defaults.password,
-      );
+      final conn = await connect(SmbSettings.defaults);
       try {
         final stream = await conn.openRead(widget.file);
         // copy: true is required — smb_connect's openRead reuses one buffer

@@ -54,4 +54,18 @@ void main() {
       expect(s, SmbSettings.defaults); // empty username re-triggers first-run
     });
   });
+
+  group('connect guard', () {
+    test('refuses to dial when username is empty', () async {
+      await expectLater(
+        connect(SmbSettings.defaults), // username is ''
+        throwsA(isA<SmbNotConfiguredException>()),
+      );
+    });
+
+    test('guard message is user-readable', () {
+      expect(SmbNotConfiguredException().toString(),
+          'SMB login not configured — open Settings');
+    });
+  });
 }
