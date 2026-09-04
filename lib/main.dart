@@ -214,6 +214,150 @@ class _HomePageState extends State<HomePage> {
   }
 }
 
+/// Settings / first-run setup for the SMB share connection. One widget,
+/// two entry modes: gear-invoked (back discards edits) and first-run
+/// (back disabled until a valid save — see PopScope).
+class SettingsPage extends StatefulWidget {
+  const SettingsPage({
+    super.key,
+    required this.settingsNotifier,
+    this.firstRun = false,
+    this.store = const SecureSettingsStore(),
+  });
+
+  final ValueNotifier<SmbSettings> settingsNotifier;
+  final bool firstRun;
+  final SettingsStore store;
+
+  @override
+  State<SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends State<SettingsPage> {
+  final _formKey = GlobalKey<FormState>();
+  late final TextEditingController _host;
+  late final TextEditingController _sharePath;
+  late final TextEditingController _domain;
+  late final TextEditingController _username;
+  late final TextEditingController _password;
+  bool _obscured = true;
+
+  @override
+  void initState() {
+    super.initState();
+    final s = widget.settingsNotifier.value;
+    _host = TextEditingController(text: s.host);
+    _sharePath = TextEditingController(text: s.sharePath);
+    _domain = TextEditingController(text: s.domain);
+    _username = TextEditingController(text: s.username);
+    _password = TextEditingController(text: s.password);
+  }
+
+  @override
+  void dispose() {
+    _host.dispose();
+    _sharePath.dispose();
+    _domain.dispose();
+    _username.dispose();
+    _password.dispose();
+    super.dispose();
+  }
+
+  // ignore: unused_element — wired into _save in Task 5.
+  SmbSettings _formSettings() => SmbSettings(
+        host: _host.text.trim(),
+        sharePath: _sharePath.text.trim(),
+        domain: _domain.text.trim(),
+        username: _username.text.trim(),
+        password: _password.text,
+      );
+
+  String? _required(String? v) =>
+      (v ?? '').trim().isEmpty ? 'Required' : null;
+
+  String? _sharePathValidator(String? v) {
+    final t = (v ?? '').trim();
+    if (t.isEmpty) return 'Required';
+    if (!t.startsWith('/')) return 'Must start with / (share/sub-folder)';
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: !widget.firstRun, // setup mode: no escape before a valid save
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(widget.firstRun ? 'Set up SMB login' : 'SMB settings'),
+        ),
+        body: Form(
+          key: _formKey,
+          child: ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              TextFormField(
+                key: const Key('host_field'),
+                controller: _host,
+                decoration: const InputDecoration(labelText: 'Host'),
+                validator: _required,
+              ),
+              TextFormField(
+                key: const Key('share_path_field'),
+                controller: _sharePath,
+                decoration: const InputDecoration(
+                    labelText: 'Share path (/share/sub-folder)'),
+                validator: _sharePathValidator,
+              ),
+              TextFormField(
+                key: const Key('domain_field'),
+                controller: _domain,
+                decoration:
+                    const InputDecoration(labelText: 'Domain (optional)'),
+              ),
+              TextFormField(
+                key: const Key('username_field'),
+                controller: _username,
+                decoration: const InputDecoration(labelText: 'Username'),
+                validator: _required,
+              ),
+              TextFormField(
+                key: const Key('password_field'),
+                controller: _password,
+                decoration: InputDecoration(
+                  labelText: 'Password (optional)',
+                  suffixIcon: IconButton(
+                    icon: Icon(_obscured
+                        ? Icons.visibility
+                        : Icons.visibility_off),
+                    onPressed: () => setState(() => _obscured = !_obscured),
+                  ),
+                ),
+                obscureText: _obscured,
+              ),
+              const SizedBox(height: 16),
+              // Test result area + buttons — wired in Task 5.
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  OutlinedButton(
+                    onPressed: null, // Task 5
+                    child: const Text('Test connection'),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton(
+                    onPressed: null, // Task 5
+                    child: const Text('Save'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// Stage 1 — scan the QR code
 class ScannerPage extends StatefulWidget {
   const ScannerPage({super.key, this.paused = false});
