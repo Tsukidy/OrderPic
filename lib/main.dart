@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:smb_connect/smb_connect.dart';
@@ -62,6 +63,69 @@ class SmbSettings {
   @override
   int get hashCode =>
       Object.hash(host, sharePath, domain, username, password);
+
+  /// Per-field fallback: config fields → defaults, credentials → empty.
+  /// An unreadable/undecryptable store is wiped and falls back to
+  /// defaults (the empty username then re-triggers first-run setup).
+  static Future<SmbSettings> load(
+      {SettingsStore store = const SecureSettingsStore()}) async {
+    try {
+      Future<String> field(String key, String fallback) async =>
+          (await store.read(key)) ?? fallback;
+      return SmbSettings(
+        host: await field('smb.host', defaults.host),
+        sharePath: await field('smb.share_path', defaults.sharePath),
+        domain: await field('smb.domain', defaults.domain),
+        username: await field('smb.username', ''),
+        password: await field('smb.password', ''),
+      );
+    } catch (_) {
+      for (final key in smbSettingKeys) {
+        try {
+          await store.delete(key);
+        } catch (_) {/* best effort wipe */}
+      }
+      return defaults;
+    }
+  }
+
+  Future<void> save({SettingsStore store = const SecureSettingsStore()}) async {
+    await store.write('smb.host', host);
+    await store.write('smb.share_path', sharePath);
+    await store.write('smb.domain', domain);
+    await store.write('smb.username', username);
+    await store.write('smb.password', password);
+  }
+}
+
+/// Storage keys for the five settings (all live in the encrypted store).
+const List<String> smbSettingKeys = [
+  'smb.host', 'smb.share_path', 'smb.domain', 'smb.username', 'smb.password',
+];
+
+/// Minimal async key-value contract so settings logic is testable
+/// without platform channels.
+abstract class SettingsStore {
+  Future<String?> read(String key);
+  Future<void> write(String key, String value);
+  Future<void> delete(String key);
+}
+
+/// Production store: flutter_secure_storage (Android Keystore / iOS Keychain).
+class SecureSettingsStore implements SettingsStore {
+  const SecureSettingsStore();
+
+  static const FlutterSecureStorage _storage = FlutterSecureStorage();
+
+  @override
+  Future<String?> read(String key) => _storage.read(key: key);
+
+  @override
+  Future<void> write(String key, String value) =>
+      _storage.write(key: key, value: value);
+
+  @override
+  Future<void> delete(String key) => _storage.delete(key: key);
 }
 
 void main() {

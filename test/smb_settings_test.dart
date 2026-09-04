@@ -1,6 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mmcpicv4/main.dart';
 
+import 'helpers/in_memory_settings_store.dart';
+
 void main() {
   group('SmbSettings', () {
     test('defaults seed config fields but never credentials', () {
@@ -25,6 +27,31 @@ void main() {
       expect(s.username, 'opk');
       expect(s.host, SmbSettings.defaults.host);
       expect(s.sharePath, SmbSettings.defaults.sharePath);
+    });
+  });
+
+  group('SmbSettings persistence', () {
+    test('missing keys fall back per-field: config seeded, credentials empty', () async {
+      final store = InMemorySettingsStore(); // nothing stored
+      final s = await SmbSettings.load(store: store);
+      expect(s.host, SmbSettings.defaults.host);
+      expect(s.sharePath, SmbSettings.defaults.sharePath);
+      expect(s.username, '');
+    });
+
+    test('save/load round-trips through the store', () async {
+      final store = InMemorySettingsStore();
+      final s = SmbSettings.defaults.copyWith(
+          host: '10.0.0.5', sharePath: '/photos/shop', username: 'opk', password: 'pw');
+      await s.save(store: store);
+      expect(store.data['smb.username'], 'opk');
+      expect(await SmbSettings.load(store: store), s);
+    });
+
+    test('unreadable store is wiped and falls back to defaults', () async {
+      final store = UnreadableSettingsStore();
+      final s = await SmbSettings.load(store: store);
+      expect(s, SmbSettings.defaults); // empty username re-triggers first-run
     });
   });
 }

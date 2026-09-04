@@ -37,6 +37,7 @@ dependencies:
   mobile_scanner: ^7.4.0
   smb_connect: ^0.0.9
   image_picker: ^1.2.3
+  flutter_secure_storage: ^11.0.0
 
 dev_dependencies:
   flutter_test:
