@@ -20,7 +20,8 @@ class UnreadableSettingsStore implements SettingsStore {
   Future<String?> read(String key) async => throw Exception('unreadable');
 
   @override
-  Future<void> write(String key, String value) async => throw Exception('unreadable');
+  Future<void> write(String key, String value) async =>
+      throw Exception('unreadable');
 
   @override
   Future<void> delete(String key) async {}

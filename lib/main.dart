@@ -14,7 +14,8 @@ import 'package:smb_connect/smb_connect.dart';
 /// (settings persist via flutter_secure_storage).
 class SmbSettings {
   final String host;
-  final String sharePath; // <share>/<sub-folder> (sub-folder is created if missing)
+  final String
+  sharePath; // <share>/<sub-folder> (sub-folder is created if missing)
   final String domain;
   final String username;
   final String password;
@@ -42,14 +43,13 @@ class SmbSettings {
     String? domain,
     String? username,
     String? password,
-  }) =>
-      SmbSettings(
-        host: host ?? this.host,
-        sharePath: sharePath ?? this.sharePath,
-        domain: domain ?? this.domain,
-        username: username ?? this.username,
-        password: password ?? this.password,
-      );
+  }) => SmbSettings(
+    host: host ?? this.host,
+    sharePath: sharePath ?? this.sharePath,
+    domain: domain ?? this.domain,
+    username: username ?? this.username,
+    password: password ?? this.password,
+  );
 
   @override
   bool operator ==(Object other) =>
@@ -61,14 +61,14 @@ class SmbSettings {
       other.password == password;
 
   @override
-  int get hashCode =>
-      Object.hash(host, sharePath, domain, username, password);
+  int get hashCode => Object.hash(host, sharePath, domain, username, password);
 
   /// Per-field fallback: config fields → defaults, credentials → empty.
   /// An unreadable/undecryptable store is wiped and falls back to
   /// defaults (the empty username then re-triggers first-run setup).
-  static Future<SmbSettings> load(
-      {SettingsStore store = const SecureSettingsStore()}) async {
+  static Future<SmbSettings> load({
+    SettingsStore store = const SecureSettingsStore(),
+  }) async {
     try {
       Future<String> field(String key, String fallback) async =>
           (await store.read(key)) ?? fallback;
@@ -83,7 +83,9 @@ class SmbSettings {
       for (final key in smbSettingKeys) {
         try {
           await store.delete(key);
-        } catch (_) {/* best effort wipe */}
+        } catch (_) {
+          /* best effort wipe */
+        }
       }
       return defaults;
     }
@@ -100,7 +102,11 @@ class SmbSettings {
 
 /// Storage keys for the five settings (all live in the encrypted store).
 const List<String> smbSettingKeys = [
-  'smb.host', 'smb.share_path', 'smb.domain', 'smb.username', 'smb.password',
+  'smb.host',
+  'smb.share_path',
+  'smb.domain',
+  'smb.username',
+  'smb.password',
 ];
 
 /// Minimal async key-value contract so settings logic is testable
@@ -187,8 +193,9 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   late final SettingsStore _store;
-  final ValueNotifier<SmbSettings> _settingsNotifier =
-      ValueNotifier(SmbSettings.defaults);
+  final ValueNotifier<SmbSettings> _settingsNotifier = ValueNotifier(
+    SmbSettings.defaults,
+  );
 
   int _tab = 0;
   bool _historyVisited = false;
@@ -244,6 +251,9 @@ class _HomePageState extends State<HomePage> {
               onOpenSettings: () => _openSettings(),
             ),
             // Re-key on settings value: remount → initState → fresh list.
+            // Invariant: remount-on-change-ONLY relies on ObjectKey identity
+            // plus ValueNotifier suppressing ==-equal assignments (so a
+            // no-op re-save can't rebuild History). Don't "simplify" either.
             _historyVisited
                 ? KeyedSubtree(
                     key: ObjectKey(settings),
@@ -324,16 +334,31 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   SmbSettings _formSettings() => SmbSettings(
-        host: _host.text.trim(),
-        sharePath: _sharePath.text.trim(),
-        domain: _domain.text.trim(),
-        username: _username.text.trim(),
-        password: _password.text,
-      );
+    host: _host.text.trim(),
+    sharePath: _sharePath.text.trim(),
+    domain: _domain.text.trim(),
+    username: _username.text.trim(),
+    password: _password.text,
+  );
 
   bool _testing = false;
   int? _testCount;
   String? _testError;
+
+  /// Share path the successful count came from (the snapshot as tested,
+  /// not the live field — see _testConnection).
+  String? _testPath;
+
+  /// A field edit invalidates the last test result: clear it so a stale
+  /// count/error can't be mistaken for the current form values.
+  void _clearTestResultIfAny() {
+    if (_testCount == null && _testError == null && _testPath == null) return;
+    setState(() {
+      _testCount = null;
+      _testError = null;
+      _testPath = null;
+    });
+  }
 
   Future<void> _testConnection() async {
     final s = _formSettings();
@@ -341,6 +366,7 @@ class _SettingsPageState extends State<SettingsPage> {
       setState(() {
         _testing = false;
         _testCount = null;
+        _testPath = null;
         _testError = SmbNotConfiguredException.message;
       });
       return;
@@ -348,6 +374,7 @@ class _SettingsPageState extends State<SettingsPage> {
     setState(() {
       _testing = true;
       _testCount = null;
+      _testPath = null;
       _testError = null;
     });
     try {
@@ -359,6 +386,7 @@ class _SettingsPageState extends State<SettingsPage> {
         setState(() {
           _testing = false;
           _testCount = entries.length;
+          _testPath = s.sharePath;
         });
       } finally {
         await conn.close();
@@ -390,8 +418,7 @@ class _SettingsPageState extends State<SettingsPage> {
     if (mounted) Navigator.of(context).pop(true);
   }
 
-  String? _required(String? v) =>
-      (v ?? '').trim().isEmpty ? 'Required' : null;
+  String? _required(String? v) => (v ?? '').trim().isEmpty ? 'Required' : null;
 
   String? _sharePathValidator(String? v) {
     final t = (v ?? '').trim();
@@ -407,6 +434,8 @@ class _SettingsPageState extends State<SettingsPage> {
       child: Scaffold(
         appBar: AppBar(
           title: Text(widget.firstRun ? 'Set up SMB login' : 'SMB settings'),
+          // Setup mode: back is blocked anyway — don't show a dead arrow.
+          automaticallyImplyLeading: !widget.firstRun,
         ),
         body: Form(
           key: _formKey,
@@ -418,25 +447,34 @@ class _SettingsPageState extends State<SettingsPage> {
                 controller: _host,
                 decoration: const InputDecoration(labelText: 'Host'),
                 validator: _required,
+                onChanged: (_) => _clearTestResultIfAny(),
               ),
               TextFormField(
                 key: const Key('share_path_field'),
                 controller: _sharePath,
                 decoration: const InputDecoration(
-                    labelText: 'Share path (/share/sub-folder)'),
+                  labelText: 'Share path (/share/sub-folder)',
+                ),
                 validator: _sharePathValidator,
+                onChanged: (_) => _clearTestResultIfAny(),
               ),
               TextFormField(
                 key: const Key('domain_field'),
                 controller: _domain,
-                decoration:
-                    const InputDecoration(labelText: 'Domain (optional)'),
+                decoration: const InputDecoration(
+                  labelText: 'Domain (optional)',
+                ),
+                onChanged: (_) => _clearTestResultIfAny(),
               ),
               TextFormField(
                 key: const Key('username_field'),
                 controller: _username,
+                // Setup gate opens on the username (spec Req 3); the gear
+                // entry never steals focus.
+                autofocus: widget.firstRun,
                 decoration: const InputDecoration(labelText: 'Username'),
                 validator: _required,
+                onChanged: (_) => _clearTestResultIfAny(),
               ),
               TextFormField(
                 key: const Key('password_field'),
@@ -444,21 +482,23 @@ class _SettingsPageState extends State<SettingsPage> {
                 decoration: InputDecoration(
                   labelText: 'Password (optional)',
                   suffixIcon: IconButton(
-                    icon: Icon(_obscured
-                        ? Icons.visibility
-                        : Icons.visibility_off),
+                    icon: Icon(
+                      _obscured ? Icons.visibility : Icons.visibility_off,
+                    ),
                     onPressed: () => setState(() => _obscured = !_obscured),
                   ),
                 ),
                 obscureText: _obscured,
+                onChanged: (_) => _clearTestResultIfAny(),
               ),
               const SizedBox(height: 16),
               if (_testError != null)
-                Text(_testError!,
-                    style: TextStyle(
-                        color: Theme.of(context).colorScheme.error)),
+                Text(
+                  _testError!,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
               if (_testCount != null)
-                Text('Connected — $_testCount files in ${_sharePath.text.trim()}'),
+                Text('Connected — $_testCount files in $_testPath'),
               const SizedBox(height: 8),
               Row(
                 children: [
@@ -468,8 +508,9 @@ class _SettingsPageState extends State<SettingsPage> {
                   ),
                   const SizedBox(width: 8),
                   FilledButton(
-                      onPressed: _testing ? null : _save,
-                      child: const Text('Save')),
+                    onPressed: _testing ? null : _save,
+                    child: const Text('Save'),
+                  ),
                 ],
               ),
             ],

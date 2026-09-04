@@ -15,7 +15,12 @@ void main() {
 
     test('equality covers all five fields', () {
       const a = SmbSettings(
-          host: 'h', sharePath: '/s', domain: '', username: 'u', password: 'p');
+        host: 'h',
+        sharePath: '/s',
+        domain: '',
+        username: 'u',
+        password: 'p',
+      );
       final b = a.copyWith();
       final c = a.copyWith(password: 'other');
       expect(a, b);
@@ -23,28 +28,35 @@ void main() {
     });
 
     test('copyWith only changes given fields', () {
-      final s = SmbSettings.defaults.copyWith(username: 'opk');
-      expect(s.username, 'opk');
+      final s = SmbSettings.defaults.copyWith(username: 'tester');
+      expect(s.username, 'tester');
       expect(s.host, SmbSettings.defaults.host);
       expect(s.sharePath, SmbSettings.defaults.sharePath);
     });
   });
 
   group('SmbSettings persistence', () {
-    test('missing keys fall back per-field: config seeded, credentials empty', () async {
-      final store = InMemorySettingsStore(); // nothing stored
-      final s = await SmbSettings.load(store: store);
-      expect(s.host, SmbSettings.defaults.host);
-      expect(s.sharePath, SmbSettings.defaults.sharePath);
-      expect(s.username, '');
-    });
+    test(
+      'missing keys fall back per-field: config seeded, credentials empty',
+      () async {
+        final store = InMemorySettingsStore(); // nothing stored
+        final s = await SmbSettings.load(store: store);
+        expect(s.host, SmbSettings.defaults.host);
+        expect(s.sharePath, SmbSettings.defaults.sharePath);
+        expect(s.username, '');
+      },
+    );
 
     test('save/load round-trips through the store', () async {
       final store = InMemorySettingsStore();
       final s = SmbSettings.defaults.copyWith(
-          host: '10.0.0.5', sharePath: '/photos/shop', username: 'opk', password: 'pw');
+        host: '10.0.0.5',
+        sharePath: '/photos/shop',
+        username: 'tester',
+        password: 'secret',
+      );
       await s.save(store: store);
-      expect(store.data['smb.username'], 'opk');
+      expect(store.data['smb.username'], 'tester');
       expect(await SmbSettings.load(store: store), s);
     });
 
@@ -64,8 +76,10 @@ void main() {
     });
 
     test('guard message is user-readable', () {
-      expect(SmbNotConfiguredException().toString(),
-          'SMB login not configured — open Settings');
+      expect(
+        SmbNotConfiguredException().toString(),
+        'SMB login not configured — open Settings',
+      );
     });
   });
 }

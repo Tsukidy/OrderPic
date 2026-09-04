@@ -4,8 +4,9 @@ import 'package:mmcpicv4/main.dart';
 import 'helpers/in_memory_settings_store.dart';
 
 void main() {
-  testWidgets('first run (no stored login) opens the setup gate',
-      (tester) async {
+  testWidgets('first run (no stored login) opens the setup gate', (
+    tester,
+  ) async {
     await tester.pumpWidget(MmcPicApp(store: InMemorySettingsStore()));
     await tester.pump(); // load() future resolves
     await tester.pump(); // post-frame callback pushes the gate
@@ -14,10 +15,9 @@ void main() {
     expect(find.text('Set up SMB login'), findsOneWidget);
   });
 
-  testWidgets('configured app starts on Scan without the gate',
-      (tester) async {
+  testWidgets('configured app starts on Scan without the gate', (tester) async {
     final store = InMemorySettingsStore()
-      ..data['smb.username'] = 'opk'
+      ..data['smb.username'] = 'tester'
       ..data['smb.host'] = '192.168.1.29';
     await tester.pumpWidget(MmcPicApp(store: store));
     await tester.pump();

@@ -1072,7 +1072,7 @@ Expected: analyzer clean, all tests pass.
 4. Test connection with correct values → `Connected — N files …`; with a bad host → inline error.
 5. Upload / History list / image download behave exactly as before (filename contract, chunk-copy download).
 6. Repoint share path → History re-lists from the new target; re-save unchanged → History does NOT reload.
-7. Clear stored username via settings → next upload shows "SMB login not configured — open Settings".
+7. Clear app data (or hit the corrupt-store wipe) → next upload shows "SMB login not configured — open Settings" (the form forbids saving an empty username; the guard itself is covered by its unit test).
 8. `adb shell run-as mmcpicv4 ls shared_prefs` → no settings file exists (data is in encrypted storage, not prefs).
 
 - [ ] **Step 4: Tick tasks.md and commit**

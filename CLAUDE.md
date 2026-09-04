@@ -39,7 +39,7 @@ Uploads are named `{OrderNumber}_{YYYYMMDD}_{HHMMSS}.jpg`, timestamped when the 
 
 ## Tests
 
-`test/widget_test.dart` is a deliberate placeholder — the main flow requires camera hardware and a network share, so it cannot be a widget test.
+The settings feature ships unit + widget tests (`test/smb_settings_test.dart`, `test/settings_page_test.dart`, `test/home_page_test.dart`) using the injectable `SettingsStore` seam (`test/helpers/in_memory_settings_store.dart`) — no platform channels needed. `test/widget_test.dart` remains a placeholder: the camera + SMB capture flow itself requires a physical device and a LAN share.
 
 <!-- BEGIN OPENSPEC SUPERPOWERS BRIDGE -->
 <!-- Source: superpowers-bridge/templates/adopters/CLAUDE.md.fragment.md -->
