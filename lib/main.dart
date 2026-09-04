@@ -8,12 +8,61 @@ import 'package:image_picker/image_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:smb_connect/smb_connect.dart';
 
-/// SMB share settings
-const String smbHost = '192.168.1.29';
-const String smbSharePath = '/zdrive/InvoiceData'; // <share>/<sub-folder> (sub-folder is created if missing)
-const String smbDomain = '';
-const String smbUsername = 'opk';
-const String smbPassword = 'opk';
+/// SMB share settings. Credentials default to empty and are never
+/// compiled into the binary — the user enters them on first startup
+/// (settings persist via flutter_secure_storage).
+class SmbSettings {
+  final String host;
+  final String sharePath; // <share>/<sub-folder> (sub-folder is created if missing)
+  final String domain;
+  final String username;
+  final String password;
+
+  const SmbSettings({
+    required this.host,
+    required this.sharePath,
+    required this.domain,
+    required this.username,
+    required this.password,
+  });
+
+  /// Seeds ONLY the non-secret fields; username/password stay empty (Q7).
+  static const SmbSettings defaults = SmbSettings(
+    host: '192.168.1.29',
+    sharePath: '/zdrive/InvoiceData',
+    domain: '',
+    username: '',
+    password: '',
+  );
+
+  SmbSettings copyWith({
+    String? host,
+    String? sharePath,
+    String? domain,
+    String? username,
+    String? password,
+  }) =>
+      SmbSettings(
+        host: host ?? this.host,
+        sharePath: sharePath ?? this.sharePath,
+        domain: domain ?? this.domain,
+        username: username ?? this.username,
+        password: password ?? this.password,
+      );
+
+  @override
+  bool operator ==(Object other) =>
+      other is SmbSettings &&
+      other.host == host &&
+      other.sharePath == sharePath &&
+      other.domain == domain &&
+      other.username == username &&
+      other.password == password;
+
+  @override
+  int get hashCode =>
+      Object.hash(host, sharePath, domain, username, password);
+}
 
 void main() {
   runApp(const MmcPicApp());
@@ -417,19 +466,20 @@ class _PreviewPageState extends State<PreviewPage> {
     try {
       final bytes = await File(widget.imagePath).readAsBytes();
       final conn = await SmbConnect.connectAuth(
-        host: smbHost,
-        domain: smbDomain,
-        username: smbUsername,
-        password: smbPassword,
+        host: SmbSettings.defaults.host,
+        domain: SmbSettings.defaults.domain,
+        username: SmbSettings.defaults.username,
+        password: SmbSettings.defaults.password,
       );
       try {
         // The share itself must already exist; sub-folders are created here.
         try {
-          await conn.createFolder(smbSharePath);
+          await conn.createFolder(SmbSettings.defaults.sharePath);
         } catch (_) {
           // Folder already exists (or deeper nesting is missing) — ignore.
         }
-        final remoteFile = await conn.createFile('$smbSharePath/$fileName');
+        final remoteFile =
+            await conn.createFile('${SmbSettings.defaults.sharePath}/$fileName');
         final sink = await conn.openWrite(remoteFile);
         sink.add(bytes);
         await sink.flush();
@@ -675,13 +725,13 @@ class _HistoryPageState extends State<HistoryPage> {
   Future<void> _refresh() async {
     try {
       final conn = await SmbConnect.connectAuth(
-        host: smbHost,
-        domain: smbDomain,
-        username: smbUsername,
-        password: smbPassword,
+        host: SmbSettings.defaults.host,
+        domain: SmbSettings.defaults.domain,
+        username: SmbSettings.defaults.username,
+        password: SmbSettings.defaults.password,
       );
       try {
-        final folder = await conn.file(smbSharePath);
+        final folder = await conn.file(SmbSettings.defaults.sharePath);
         final entries = await conn.listFiles(folder);
         // Names encode the capture time, so descending name order is
         // newest-first.
@@ -775,7 +825,7 @@ class _HistoryPageState extends State<HistoryPage> {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              'Could not list \\\\$smbHost$smbSharePath\n\n$_error',
+              'Could not list \\\\${SmbSettings.defaults.host}${SmbSettings.defaults.sharePath}\n\n$_error',
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 16),
@@ -814,10 +864,10 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   Future<void> _load() async {
     try {
       final conn = await SmbConnect.connectAuth(
-        host: smbHost,
-        domain: smbDomain,
-        username: smbUsername,
-        password: smbPassword,
+        host: SmbSettings.defaults.host,
+        domain: SmbSettings.defaults.domain,
+        username: SmbSettings.defaults.username,
+        password: SmbSettings.defaults.password,
       );
       try {
         final stream = await conn.openRead(widget.file);
