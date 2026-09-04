@@ -49,6 +49,23 @@ void main() {
     );
   });
 
+  testWidgets('empty host is rejected', (tester) async {
+    final notifier = ValueNotifier(SmbSettings.defaults);
+    await _openSettings(
+        tester, SettingsPage(settingsNotifier: notifier, store: InMemorySettingsStore()));
+    await tester.enterText(find.byKey(const Key('host_field')), '');
+    await tester.tap(find.text('Save'));
+    await tester.pump();
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('host_field')),
+        matching: find.text('Required'),
+      ),
+      findsOneWidget,
+    );
+    expect(find.byType(SettingsPage), findsOneWidget); // did not pop
+  });
+
   testWidgets('share path without leading slash is rejected', (tester) async {
     final notifier = ValueNotifier(SmbSettings.defaults);
     await _openSettings(
