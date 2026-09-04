@@ -28,8 +28,8 @@ The entire app is `lib/main.dart` — plain `StatefulWidget`s, no state-manageme
 
 ### SMB layer
 
-- Connection settings (host, `<share>/<sub-folder>` path, domain, user, password) are hardcoded constants at the top of `main.dart`. The share itself must already exist; sub-folders are created at upload time.
-- Every operation (upload in `PreviewPage._upload`, listing in `HistoryPage._refresh`, download in `ImageViewerPage._load`) opens a fresh `SmbConnect.connectAuth` connection and closes it in a `finally`.
+- Connection settings (host, `<share>/<sub-folder>` path, domain, user, password) live in the `SmbSettings` value class at the top of `main.dart`, persisted per-device via `flutter_secure_storage` behind the injectable `SettingsStore` seam. Credentials are never compiled into the binary — first startup opens a required setup form. Edit settings via the gear icon in either tab's app bar; the share itself must already exist, sub-folders are created at upload time.
+- Every operation (upload in `PreviewPage._upload`, listing in `HistoryPage._refresh`, download in `ImageViewerPage._load`) opens a fresh connection via the shared `connect(SmbSettings)` helper (which refuses to dial when no username is configured) and closes it in a `finally`.
 - Photos are captured via `image_picker` with no resize/compression; the original bytes are written to the share and the local capture deleted best-effort after success.
 - When downloading, the `openRead` stream must be copied chunk-by-chunk into a `BytesBuilder` — smb_connect reuses one buffer for every chunk it yields. Don't "simplify" this.
 
