@@ -6,7 +6,9 @@ plugins {
 
 android {
     namespace = "com.mmc.magicmicro.com.mmcpicv4"
-    compileSdk = flutter.compileSdkVersion
+    // flutter_secure_storage 11 requires compileSdk 37; the Flutter toolchain
+    // still defaults to 36 (see FlutterExtension.compileSdkVersion), so pin it here.
+    compileSdk = 37
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
