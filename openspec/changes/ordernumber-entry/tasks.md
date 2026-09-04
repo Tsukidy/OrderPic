@@ -18,13 +18,13 @@
   `CameraPage(orderNumber: value)`; when the flow returns, clear
   `_processing` and restart the controller — mirroring `_onDetect`'s
   stop/push/restart sequence
-- [ ] 2.2 Confirm the typed number appears in the order chip on the camera
+- [x] 2.2 Confirm the typed number appears in the order chip on the camera
   and preview screens with no edits to `CameraPage`/`PreviewPage`
 
 ## 3. Verification
 
 - [x] 3.1 Run `flutter analyze` — must be clean
-- [ ] 3.2 Manual on-device pass of the acceptance list in design.md
+- [x] 3.2 Manual on-device pass of the acceptance list in design.md
   §Migration Plan: dialog opens with number keyboard and focus; non-digit
   type/paste impossible; empty confirm disabled; cancel leaves detection
   working; QR in view during dialog does not stack dialogs; confirm starts
