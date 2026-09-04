@@ -94,6 +94,7 @@ class _ScannerPageState extends State<ScannerPage> {
   final MobileScannerController _controller = MobileScannerController(
     detectionSpeed: DetectionSpeed.noDuplicates,
   );
+  final TextEditingController _entryController = TextEditingController();
   bool _processing = false;
 
   @override
@@ -107,6 +108,7 @@ class _ScannerPageState extends State<ScannerPage> {
   @override
   void dispose() {
     _controller.dispose();
+    _entryController.dispose();
     super.dispose();
   }
 
@@ -167,14 +169,14 @@ class _ScannerPageState extends State<ScannerPage> {
   Future<void> _showEntryDialog() async {
     if (_processing) return;
     _processing = true;
-    final controller = TextEditingController();
+    _entryController.clear();
 
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Type order number'),
         content: TextField(
-          controller: controller,
+          controller: _entryController,
           autofocus: true,
           keyboardType: TextInputType.number,
           // Digits-only input keeps the upload filename contract safe by
@@ -192,7 +194,7 @@ class _ScannerPageState extends State<ScannerPage> {
             child: const Text('Cancel'),
           ),
           ValueListenableBuilder<TextEditingValue>(
-            valueListenable: controller,
+            valueListenable: _entryController,
             builder: (context, value, _) => FilledButton(
               // Disabled while the trimmed value is empty.
               onPressed: value.text.trim().isEmpty
@@ -205,8 +207,7 @@ class _ScannerPageState extends State<ScannerPage> {
       ),
     );
 
-    final orderNumber = controller.text.trim();
-    controller.dispose();
+    final orderNumber = _entryController.text.trim();
 
     if (!mounted) return;
     if (confirmed == true && orderNumber.isNotEmpty) {
