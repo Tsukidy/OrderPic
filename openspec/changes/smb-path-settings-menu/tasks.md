@@ -93,6 +93,7 @@ Dependency-ordered. References: `specs/smb-settings/spec.md` for WHAT,
 - [x] 7.1 Update CLAUDE.md "SMB layer" section: settings are a
       `SmbSettings` object persisted via `flutter_secure_storage` with
       an in-app settings screen (no longer hardcoded constants)
-- [ ] 7.2 Merge with `ordernumber-entry` per the implementation plan's
+- [x] 7.2 Merge with `ordernumber-entry` per the implementation plan's
       stated order; resolve the `_ScannerPageState.build` conflict
       take-both (their body Stack + our app-bar actions)
+      (resolved trivially: base already contained the merged ordernumber-entry change; verification-only, no conflict)
