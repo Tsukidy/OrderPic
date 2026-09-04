@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BIN_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+TOOLING_DIR="$(cd -- "$BIN_DIR/.." && pwd -P)"
+OPENSPEC_REAL="$TOOLING_DIR/openspec-cli/node_modules/.bin/openspec"
+
+if [[ ! -x "$OPENSPEC_REAL" ]]; then
+    printf 'OpenSpec executable not found: %s\n' "$OPENSPEC_REAL" >&2
+    exit 1
+fi
+
+export XDG_CONFIG_HOME="$TOOLING_DIR/config"
+
+exec "$OPENSPEC_REAL" "$@"

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+
+export PATH="$PROJECT_DIR/.claude-tooling/bin:$PATH"
+
+cd "$PROJECT_DIR"
+exec claude "$@"
