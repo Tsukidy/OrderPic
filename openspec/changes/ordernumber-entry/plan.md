@@ -57,7 +57,31 @@ Insert after `_onDetect`'s closing brace (below main.dart:153). This is the QR p
 
 - [ ] **Step 3: Add `_showEntryDialog` to `_ScannerPageState`**
 
-Insert directly below `_startCapture`:
+> **Amended during apply (2026-09-04, commit fa0ad8b):** the original block
+> created a local `TextEditingController` and disposed it right after
+> `showDialog` returned — but `Route.didPop` completes that future *before*
+> the dialog's exit animation runs (flutter `navigator.dart:433–480`), so the
+> dispose fired under a still-mounted TextField and crashed on device
+> ("A TextEditingController was used after being disposed" + duplicate-GlobalKeys
+> cascade; reproduced on the manual path only, QR dialog has no controller).
+> The controller is now a `_ScannerPageState` field whose lifetime spans the
+> exit animation. Code below matches the shipped fix.
+
+Add the field next to `_controller`/`_processing`, and dispose it in the
+existing `dispose()`:
+
+```dart
+  final TextEditingController _entryController = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    _entryController.dispose();
+    super.dispose();
+  }
+```
+
+Insert the method directly below `_startCapture`:
 
 ```dart
   /// Fallback entry: type an order number when the QR code won't scan.
@@ -66,14 +90,14 @@ Insert directly below `_startCapture`:
   Future<void> _showEntryDialog() async {
     if (_processing) return;
     _processing = true;
-    final controller = TextEditingController();
+    _entryController.clear();
 
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Type order number'),
         content: TextField(
-          controller: controller,
+          controller: _entryController,
           autofocus: true,
           keyboardType: TextInputType.number,
           // Digits-only input keeps the upload filename contract safe by
@@ -91,7 +115,7 @@ Insert directly below `_startCapture`:
             child: const Text('Cancel'),
           ),
           ValueListenableBuilder<TextEditingValue>(
-            valueListenable: controller,
+            valueListenable: _entryController,
             builder: (context, value, _) => FilledButton(
               // Disabled while the trimmed value is empty.
               onPressed: value.text.trim().isEmpty
@@ -104,8 +128,7 @@ Insert directly below `_startCapture`:
       ),
     );
 
-    final orderNumber = controller.text.trim();
-    controller.dispose();
+    final orderNumber = _entryController.text.trim();
 
     if (!mounted) return;
     if (confirmed == true && orderNumber.isNotEmpty) {
