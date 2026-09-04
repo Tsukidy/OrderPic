@@ -141,12 +141,7 @@ class _ScannerPageState extends State<ScannerPage> {
     if (confirmed == true) {
       // Push the capture flow on top of the tab shell; when it eventually
       // pops (upload finished / cancelled), resume scanning.
-      await Navigator.of(context).push(
-        MaterialPageRoute(builder: (_) => CameraPage(orderNumber: orderNumber)),
-      );
-      if (!mounted) return;
-      _processing = false;
-      unawaited(_controller.start());
+      await _startCapture(orderNumber);
     } else {
       _processing = false;
       unawaited(_controller.start());
