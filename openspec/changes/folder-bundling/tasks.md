@@ -3,7 +3,7 @@
 ## 1. Phase 0 — repo split & OrderPic rebrand (no behavior change)
 
 - [x] 1.1 Split `lib/main.dart` into the target layout (`settings/`, `smb/`, `capture/naming.dart` placeholder-free, `pages/`, thin `main.dart`); update test imports; `flutter analyze` + `flutter test` green
-- [ ] 1.2 Full rebrand: pubspec `name: orderpic` + `package:` import rewrites, manifest `android:label="OrderPic"`, `MaterialApp.title`/`OrderPicApp` class, `applicationId`/`namespace` → `com.mmc.magicmicro.com.orderpic` with MainActivity relocated to the matching directory
+- [x] 1.2 Full rebrand: pubspec `name: orderpic` + `package:` import rewrites, manifest `android:label="OrderPic"`, `MaterialApp.title`/`OrderPicApp` class, `applicationId`/`namespace` → `com.mmc.magicmicro.com.orderpic` with MainActivity relocated to the matching directory
 - [ ] 1.3 Device smoke pass on the new identity: scan → shoot → upload → History; confirm the first-run gate re-triggers (new app identity, no stored credentials)
 
 ## 2. Settings model & sectioned page
