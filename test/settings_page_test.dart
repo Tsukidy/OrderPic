@@ -23,6 +23,14 @@ Future<void> _openSettings(WidgetTester tester, SettingsPage page) async {
   await tester.pumpAndSettle();
 }
 
+/// The sectioned page is taller than the default test surface — the
+/// Save/Test row lives below the fold. Scroll it into view before tapping.
+Future<void> _tapScrolled(WidgetTester tester, Finder finder) async {
+  await tester.ensureVisible(finder);
+  await tester.pumpAndSettle();
+  await tester.tap(finder);
+}
+
 void main() {
   testWidgets('fields are seeded from current settings', (tester) async {
     final notifier = ValueNotifier(
@@ -83,7 +91,7 @@ void main() {
       SettingsPage(settingsNotifier: notifier, store: InMemorySettingsStore()),
     );
     await tester.enterText(find.byKey(const Key('host_field')), '');
-    await tester.tap(find.text('Save'));
+    await _tapScrolled(tester, find.text('Save'));
     await tester.pump();
     expect(
       find.descendant(
@@ -107,7 +115,7 @@ void main() {
       find.byKey(const Key('share_path_field')),
       'zdrive/x',
     );
-    await tester.tap(find.text('Save'));
+    await _tapScrolled(tester, find.text('Save'));
     await tester.pump();
     expect(find.text('Must start with / (share/sub-folder)'), findsOneWidget);
     expect(find.byType(SettingsPage), findsOneWidget); // did not pop
@@ -122,7 +130,7 @@ void main() {
       SettingsPage(settingsNotifier: notifier, store: InMemorySettingsStore()),
     );
     await tester.enterText(find.byKey(const Key('username_field')), '');
-    await tester.tap(find.text('Save'));
+    await _tapScrolled(tester, find.text('Save'));
     await tester.pump();
     expect(find.text('Required'), findsAtLeastNWidgets(1));
     expect(find.byType(SettingsPage), findsOneWidget); // did not pop
@@ -139,7 +147,7 @@ void main() {
     );
     await tester.enterText(find.byKey(const Key('username_field')), 'tester');
     await tester.enterText(find.byKey(const Key('password_field')), 'secret');
-    await tester.tap(find.text('Save'));
+    await _tapScrolled(tester, find.text('Save'));
     await tester.pumpAndSettle();
     expect(find.byType(SettingsPage), findsNothing); // popped
     expect(notifier.value.connection.username, 'tester');
@@ -157,7 +165,7 @@ void main() {
       SettingsPage(settingsNotifier: notifier, store: store),
     );
     await tester.enterText(find.byKey(const Key('username_field')), 'tester');
-    await tester.tap(find.text('Save'));
+    await _tapScrolled(tester, find.text('Save'));
     await tester.pumpAndSettle();
     expect(find.byType(SettingsPage), findsNothing);
     expect(store.data['smb.password'], '');
@@ -174,7 +182,7 @@ void main() {
       SettingsPage(settingsNotifier: notifier, store: InMemorySettingsStore()),
     );
     await tester.enterText(find.byKey(const Key('host_field')), '10.9.9.9');
-    await tester.tap(find.text('Test connection'));
+    await _tapScrolled(tester, find.text('Test connection'));
     await tester.pump();
     expect(find.text(SmbNotConfiguredException.message), findsOneWidget);
   });
@@ -199,5 +207,142 @@ void main() {
     await tester.pump();
     await tester.pump();
     expect(find.byType(SettingsPage), findsOneWidget); // still mounted
+  });
+
+  group('sectioned layout', () {
+    testWidgets('gear-mode title is Settings', (tester) async {
+      final notifier = ValueNotifier(AppSettings.defaults);
+      await _openSettings(
+        tester,
+        SettingsPage(settingsNotifier: notifier, store: InMemorySettingsStore()),
+      );
+      expect(find.text('Settings'), findsOneWidget);
+      expect(find.text('SMB settings'), findsNothing);
+    });
+
+    testWidgets('first-run title stays Set up SMB login', (tester) async {
+      final notifier = ValueNotifier(AppSettings.defaults);
+      await _openSettings(
+        tester,
+        SettingsPage(
+          settingsNotifier: notifier,
+          firstRun: true,
+          store: InMemorySettingsStore(),
+        ),
+      );
+      expect(find.text('Set up SMB login'), findsOneWidget);
+      expect(find.text('Settings'), findsNothing);
+    });
+
+    testWidgets(
+      'both section headers present, Capture & upload above SMB connection',
+      (tester) async {
+        final notifier = ValueNotifier(AppSettings.defaults);
+        await _openSettings(
+          tester,
+          SettingsPage(
+            settingsNotifier: notifier,
+            store: InMemorySettingsStore(),
+          ),
+        );
+        expect(find.text('Capture & upload'), findsOneWidget);
+        expect(find.text('SMB connection'), findsOneWidget);
+        // Capture & upload section sits ABOVE SMB connection in the list —
+        // compare laid-out y positions (finder evaluate order alone isn't
+        // a layout guarantee).
+        final captureTop = tester.getTopLeft(
+          find.text('Capture & upload'),
+        ).dy;
+        final connectionTop = tester.getTopLeft(
+          find.text('SMB connection'),
+        ).dy;
+        expect(captureTop, lessThan(connectionTop));
+      },
+    );
+
+    testWidgets('upload controls are seeded from notifier value', (
+      tester,
+    ) async {
+      final notifier = ValueNotifier(
+        AppSettings.defaults.copyWith(
+          upload: const UploadPrefs(
+            useOrderFolders: true,
+            batchMode: true,
+            format: ImageFormat.png,
+          ),
+        ),
+      );
+      await _openSettings(
+        tester,
+        SettingsPage(settingsNotifier: notifier, store: InMemorySettingsStore()),
+      );
+      expect(
+        tester
+            .widget<SwitchListTile>(find.byKey(const Key('folders_toggle')))
+            .value,
+        isTrue,
+      );
+      expect(
+        tester.widget<SwitchListTile>(find.byKey(const Key('batch_toggle'))).value,
+        isTrue,
+      );
+      expect(
+        tester
+            .widget<SegmentedButton<ImageFormat>>(
+              find.byKey(const Key('format_selector')),
+            )
+            .selected,
+        {ImageFormat.png},
+      );
+    });
+
+    testWidgets(
+      'toggling folders and saving updates notifier and persists',
+      (tester) async {
+        final store = InMemorySettingsStore();
+        final notifier = ValueNotifier(AppSettings.defaults);
+        await _openSettings(
+          tester,
+          SettingsPage(settingsNotifier: notifier, store: store),
+        );
+        // Defaults have an empty username, so a plain Save would be blocked
+        // by validation — seed a valid connection first.
+        await tester.enterText(find.byKey(const Key('username_field')), 'tester');
+        await _tapScrolled(tester, find.byKey(const Key('folders_toggle')));
+        await tester.pump();
+        await _tapScrolled(tester, find.text('Save'));
+        await tester.pumpAndSettle();
+        expect(find.byType(SettingsPage), findsNothing); // popped
+        expect(notifier.value.upload.useOrderFolders, isTrue);
+        expect(store.data['upload.use_order_folders'], 'true');
+      },
+    );
+
+    testWidgets(
+      'upload-only save reuses the live connection instance',
+      (tester) async {
+        final store = InMemorySettingsStore();
+        // Connection already valid — the form fields load it verbatim, so a
+        // save that only touches upload prefs must NOT swap the connection
+        // instance (ObjectKey(settings.connection) → no History remount).
+        final notifier = ValueNotifier(
+          AppSettings.defaults.copyWith(
+            connection: ConnectionSettings.defaults.copyWith(username: 'tester'),
+          ),
+        );
+        await _openSettings(
+          tester,
+          SettingsPage(settingsNotifier: notifier, store: store),
+        );
+        final liveConnection = notifier.value.connection;
+        await _tapScrolled(tester, find.byKey(const Key('folders_toggle')));
+        await tester.pump();
+        await _tapScrolled(tester, find.text('Save'));
+        await tester.pumpAndSettle();
+        expect(find.byType(SettingsPage), findsNothing); // popped
+        expect(notifier.value.upload.useOrderFolders, isTrue);
+        expect(identical(notifier.value.connection, liveConnection), isTrue);
+      },
+    );
   });
 }

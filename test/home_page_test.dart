@@ -32,10 +32,10 @@ void main() {
     expect(find.text('Scan QR code'), findsOneWidget);
     // Gear in the Scan app bar opens settings (History's gear is the same
     // callback — covered by the manual pass).
-    await tester.tap(find.byTooltip('SMB settings'));
+    await tester.tap(find.byTooltip('Settings'));
     await tester.pumpAndSettle();
     expect(find.byType(SettingsPage), findsOneWidget);
-    expect(find.text('SMB settings'), findsOneWidget); // not setup mode
+    expect(find.text('Settings'), findsOneWidget); // not setup mode
   });
 
   // Remount narrowing: the History KeyedSubtree key is

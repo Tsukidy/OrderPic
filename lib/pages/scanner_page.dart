@@ -211,7 +211,7 @@ class _ScannerPageState extends State<ScannerPage> with RouteAware {
         actions: [
           IconButton(
             icon: const Icon(Icons.settings),
-            tooltip: 'SMB settings',
+            tooltip: 'Settings',
             onPressed: widget.onOpenSettings,
           ),
         ],

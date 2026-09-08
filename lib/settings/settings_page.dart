@@ -4,9 +4,11 @@ import '../smb/smb.dart';
 import 'app_settings.dart';
 import 'settings_store.dart';
 
-/// Settings / first-run setup for the SMB share connection. One widget,
-/// two entry modes: gear-invoked (back discards edits) and first-run
-/// (back disabled until a valid save — see PopScope).
+/// Settings / first-run setup. One widget, two entry modes: gear-invoked
+/// ("Settings"; back discards edits) and first-run ("Set up SMB login";
+/// back disabled until a valid save — see PopScope). Edits the whole
+/// [AppSettings] in two sections — Capture & upload prefs on top, the
+/// SMB connection below.
 class SettingsPage extends StatefulWidget {
   const SettingsPage({
     super.key,
@@ -32,6 +34,13 @@ class _SettingsPageState extends State<SettingsPage> {
   late final TextEditingController _password;
   bool _obscured = true;
 
+  // Capture & upload section. The quality knobs (Task 2.4) will join
+  // these; until then the quality fields ride through _save untouched
+  // from the live value.
+  late bool _folders;
+  late bool _batch;
+  late ImageFormat _format;
+
   @override
   void initState() {
     super.initState();
@@ -41,6 +50,10 @@ class _SettingsPageState extends State<SettingsPage> {
     _domain = TextEditingController(text: s.domain);
     _username = TextEditingController(text: s.username);
     _password = TextEditingController(text: s.password);
+    final upload = widget.settingsNotifier.value.upload;
+    _folders = upload.useOrderFolders;
+    _batch = upload.batchMode;
+    _format = upload.format;
   }
 
   @override
@@ -124,8 +137,19 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<void> _save() async {
     if (!(_formKey.currentState?.validate() ?? false)) return;
     final s = _formSettings();
+    // Build the upload half from the form state. The quality fields
+    // aren't editable yet (Task 2.4) — copyWith them from the live value
+    // so an early save can't silently reset them to defaults.
+    final current = widget.settingsNotifier.value;
+    final upload = current.upload.copyWith(
+      useOrderFolders: _folders,
+      batchMode: _batch,
+      format: _format,
+    );
     try {
-      await s.save(store: widget.store);
+      await AppSettings(connection: s, upload: upload).save(
+        store: widget.store,
+      );
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -139,12 +163,13 @@ class _SettingsPageState extends State<SettingsPage> {
     // identical() — a fresh ==-equal connection instance would look
     // like a change to that key. So when the form values are unchanged,
     // reuse the LIVE connection instance; only a real change swaps
-    // identity. copyWith likewise preserves the upload half by instance,
-    // and a fully ==-equal AppSettings is dropped by ValueNotifier's
-    // == suppression (no History rebuild at all).
-    final current = widget.settingsNotifier.value;
+    // identity. The upload half likewise keeps the live quality-field
+    // values by copyWith, and a fully ==-equal AppSettings is dropped
+    // by ValueNotifier's == suppression (no History rebuild at all) —
+    // an upload-only save rebuilds History in place, never remounts it.
     widget.settingsNotifier.value = current.copyWith(
       connection: s == current.connection ? current.connection : s,
+      upload: upload,
     );
     if (mounted) Navigator.of(context).pop(true);
   }
@@ -164,7 +189,7 @@ class _SettingsPageState extends State<SettingsPage> {
       canPop: !widget.firstRun, // setup mode: no escape before a valid save
       child: Scaffold(
         appBar: AppBar(
-          title: Text(widget.firstRun ? 'Set up SMB login' : 'SMB settings'),
+          title: Text(widget.firstRun ? 'Set up SMB login' : 'Settings'),
           // Setup mode: back is blocked anyway — don't show a dead arrow.
           automaticallyImplyLeading: !widget.firstRun,
         ),
@@ -173,6 +198,37 @@ class _SettingsPageState extends State<SettingsPage> {
           child: ListView(
             padding: const EdgeInsets.all(16),
             children: [
+              Text(
+                'Capture & upload',
+                style: Theme.of(context).textTheme.labelLarge,
+              ),
+              SwitchListTile(
+                key: const Key('folders_toggle'),
+                title: const Text('Upload into per-order folders'),
+                value: _folders,
+                onChanged: (v) => setState(() => _folders = v),
+              ),
+              SwitchListTile(
+                key: const Key('batch_toggle'),
+                title: const Text('Multi-photo batch capture'),
+                value: _batch,
+                onChanged: (v) => setState(() => _batch = v),
+              ),
+              SegmentedButton<ImageFormat>(
+                key: const Key('format_selector'),
+                segments: const [
+                  ButtonSegment(value: ImageFormat.jpeg, label: Text('JPEG')),
+                  ButtonSegment(value: ImageFormat.png, label: Text('PNG')),
+                ],
+                selected: {_format},
+                onSelectionChanged: (selection) =>
+                    setState(() => _format = selection.first),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'SMB connection',
+                style: Theme.of(context).textTheme.labelLarge,
+              ),
               TextFormField(
                 key: const Key('host_field'),
                 controller: _host,

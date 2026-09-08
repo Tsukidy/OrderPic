@@ -108,7 +108,7 @@ class _HistoryPageState extends State<HistoryPage> {
         actions: [
           IconButton(
             icon: const Icon(Icons.settings),
-            tooltip: 'SMB settings',
+            tooltip: 'Settings',
             onPressed: widget.onOpenSettings,
           ),
         ],
