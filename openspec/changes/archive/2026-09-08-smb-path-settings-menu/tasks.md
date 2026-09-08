@@ -83,10 +83,13 @@ Dependency-ordered. References: `specs/smb-settings/spec.md` for WHAT,
 - [x] 6.2 Widget tests — first-run gate: `HomePage` pushes setup when
       unconfigured; starts clean (no gate) when configured
 - [x] 6.3 `flutter analyze` clean and `flutter test` green
-- [ ] 6.4 On-device manual pass: first-run entry, save + restart
+- [x] 6.4 On-device manual pass: first-run entry, save + restart
       persistence, Test connection against the real share,
       upload / History list / download unchanged, History auto-refresh
       after repointing the share
+      (accepted 2026-09-08: primary flow device-verified — gate, setup save,
+      upload to share, History display; remaining sub-checks covered by
+      automated tests at logic level, residual manual risk accepted by owner)
 
 ## 7. Docs & merge
 
