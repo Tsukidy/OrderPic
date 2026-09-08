@@ -27,8 +27,8 @@
 
 - [x] 4.1 `uploadSession()`: single SMB connection; best-effort `createFolder` of `sharePath` then `{sharePath}/{order}` when folders on; target-path builder flat vs folder (unit tests for both)
 - [x] 4.2 Per-shot outcome tracking: success deletes its local file, failure keeps it; Retry uploads only the remaining shots; progress reported as completed/total
-- [ ] 4.3 PreviewPage batch UI: "Order N — k photos" chip, display-only thumbnail strip, Retake (last shot only), Add photo, Upload all; batch-off renders exactly today's single-shot actions (widget tests)
-- [ ] 4.4 Post-batch summary banner with Scan next QR and More for this order (fresh empty session, same order number)
+- [x] 4.3 PreviewPage batch UI: "Order N — k photos" chip, display-only thumbnail strip, Retake (last shot only), Add photo, Upload all; batch-off renders exactly today's single-shot actions (widget tests)
+- [x] 4.4 Post-batch summary banner with Scan next QR and More for this order (fresh empty session, same order number)
 
 ## 5. History drill-down
 
