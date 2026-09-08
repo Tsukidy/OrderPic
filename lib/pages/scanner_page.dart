@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
+import '../capture/session.dart';
 import '../route_observer.dart';
 import '../settings/app_settings.dart';
 import 'camera_page.dart';
@@ -129,17 +130,28 @@ class _ScannerPageState extends State<ScannerPage> with RouteAware {
 
   /// Stop scanning, run the capture flow for [orderNumber], then resume
   /// scanning when it finishes. Shared by the QR and manual entry paths.
+  ///
+  /// The session is born here so the whole flow (camera → preview →
+  /// retakes/adds → upload) shares one [CaptureSession] and its shot
+  /// numbering. When it empties, the flow reclaims the dir itself
+  /// (uploadSession's cleanupIfEmpty / CameraPage's cancel path); shots
+  /// still staged at pop are left for the next-launch sweep.
   Future<void> _startCapture(String orderNumber) async {
     await _controller.stop();
+    if (!mounted) return;
+    final session = await CaptureSession.create(orderNumber);
     if (!mounted) return;
     await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => CameraPage(
-          orderNumber: orderNumber,
+          session: session,
           settingsNotifier: widget.settingsNotifier,
         ),
       ),
     );
+    // Flow finished or was cancelled with shots still staged? They stay on
+    // disk under the session dir; a later 'More for this order' path or the
+    // next-launch sweep owns them from here.
     if (!mounted) return;
     _processing = false;
     unawaited(_controller.start());
