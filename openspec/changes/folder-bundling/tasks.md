@@ -12,7 +12,7 @@
 
 - [x] 2.1 `UploadPrefs` value class — fields (`useOrderFolders`, `batchMode`, `format`, `jpegQuality`), behavior-preserving defaults, `==`/`hashCode`, `upload.*` keys, load/save via `SettingsStore`; unit tests for defaults + round-trip
 - [x] 2.2 `AppSettings { ConnectionSettings, UploadPrefs }` umbrella (`SmbSettings` renamed `ConnectionSettings`), one `ValueNotifier`; History remount key narrows to `ObjectKey(settings.connection)` with updated invariant comment; first-run gate reads `connection.username`
-- [ ] 2.3 Settings page sections: title "Settings" (first-run keeps "Set up SMB login"), "Capture & upload" above "SMB connection"; toggles/format/quality wired into the unified save
+- [x] 2.3 Settings page sections: title "Settings" (first-run keeps "Set up SMB login"), "Capture & upload" above "SMB connection"; toggles/format/quality wired into the unified save
 - [ ] 2.4 JPEG quality control: Original/High/Balanced/Small presets + Custom (slider 30–100, optional max long-edge px); selecting PNG hides the entire quality UI and restores it on switch-back; widget tests for both
 - [x] 2.5 Widget test: an upload-only save (e.g. folders toggle) does not remount History; a connection change does
 
