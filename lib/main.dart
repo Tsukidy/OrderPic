@@ -4,18 +4,18 @@ import 'pages/home_page.dart';
 import 'settings/settings_store.dart';
 
 void main() {
-  runApp(const MmcPicApp());
+  runApp(const OrderPicApp());
 }
 
-class MmcPicApp extends StatelessWidget {
-  const MmcPicApp({super.key, this.store = const SecureSettingsStore()});
+class OrderPicApp extends StatelessWidget {
+  const OrderPicApp({super.key, this.store = const SecureSettingsStore()});
 
   final SettingsStore store;
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'MMCPic',
+      title: 'OrderPic',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
           seedColor: Colors.deepPurple,

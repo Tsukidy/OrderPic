@@ -5,7 +5,7 @@ plugins {
 }
 
 android {
-    namespace = "com.mmc.magicmicro.com.mmcpicv4"
+    namespace = "com.mmc.magicmicro.com.orderpic"
     // flutter_secure_storage 11 requires compileSdk 37; the Flutter toolchain
     // still defaults to 36 (see FlutterExtension.compileSdkVersion), so pin it here.
     compileSdk = 37
@@ -18,7 +18,7 @@ android {
 
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.mmc.magicmicro.com.mmcpicv4"
+        applicationId = "com.mmc.magicmicro.com.orderpic"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion

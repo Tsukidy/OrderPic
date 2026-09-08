@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:mmcpicv4/main.dart';
-import 'package:mmcpicv4/settings/settings_page.dart';
+import 'package:orderpic/main.dart';
+import 'package:orderpic/settings/settings_page.dart';
 
 import 'helpers/in_memory_settings_store.dart';
 
@@ -8,7 +8,7 @@ void main() {
   testWidgets('first run (no stored login) opens the setup gate', (
     tester,
   ) async {
-    await tester.pumpWidget(MmcPicApp(store: InMemorySettingsStore()));
+    await tester.pumpWidget(OrderPicApp(store: InMemorySettingsStore()));
     await tester.pump(); // load() future resolves
     await tester.pump(); // post-frame callback pushes the gate
     await tester.pump(); // route builds
@@ -20,7 +20,7 @@ void main() {
     final store = InMemorySettingsStore()
       ..data['smb.username'] = 'tester'
       ..data['smb.host'] = '192.168.1.29';
-    await tester.pumpWidget(MmcPicApp(store: store));
+    await tester.pumpWidget(OrderPicApp(store: store));
     await tester.pump();
     await tester.pump();
     expect(find.byType(SettingsPage), findsNothing);

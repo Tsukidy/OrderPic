@@ -1,4 +1,4 @@
-package com.mmc.magicmicro.com.mmcpicv4
+package com.mmc.magicmicro.com.orderpic
 
 import io.flutter.embedding.android.FlutterActivity
 

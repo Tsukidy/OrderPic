@@ -1,4 +1,4 @@
-import 'package:mmcpicv4/settings/settings_store.dart';
+import 'package:orderpic/settings/settings_store.dart';
 
 /// In-memory SettingsStore for tests — no platform channels.
 class InMemorySettingsStore implements SettingsStore {
