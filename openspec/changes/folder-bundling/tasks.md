@@ -6,7 +6,7 @@
 - [x] 1.2 Full rebrand: pubspec `name: orderpic` + `package:` import rewrites, manifest `android:label="OrderPic"`, `MaterialApp.title`/`OrderPicApp` class, `applicationId`/`namespace` → `com.mmc.magicmicro.com.orderpic` with MainActivity relocated to the matching directory
 - [x] 1.3 Device smoke pass on the new identity: scan → shoot → upload → History; confirm the first-run gate re-triggers (new app identity, no stored credentials)
 - [x] 1.4 (user-directed, found in 1.3) Pause the scanner camera while any route is pushed on top of the tab shell (Settings currently keeps grabbing QR codes)
-- [ ] 1.5 (user-directed, found in 1.3) Refresh the History listing each time the History tab is presented, so uploads appear without manual pull-to-refresh
+- [x] 1.5 (user-directed, found in 1.3) Refresh the History listing each time the History tab is presented, so uploads appear without manual pull-to-refresh
 
 ## 2. Settings model & sectioned page
 
