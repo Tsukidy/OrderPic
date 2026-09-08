@@ -86,6 +86,19 @@ more difficult. This should be done before our changes."
 → **Phase 0**: pure mechanical split of lib/main.dart into lib/ files, no
 behavior change, gated by analyze + tests + device smoke before feature work.
 
+**Q8 — Rename the program to OrderPic?**
+User: "change the name of the program from 'mmcpic' to 'OrderPic'" — and on
+being shown the fork between display-name-only and full identity rebrand,
+chose **full rebrand**, accepting the stated migration cost.
+→ Phase 0 also rebrands: launcher label and MaterialApp title become
+"OrderPic"; `MmcPicApp` → `OrderPicApp`; pubspec `name: mmcpicv4` → `orderpic`
+(all `package:mmcpicv4/` imports rewritten); `applicationId`/`namespace`
+`com.mmc.magicmicro.com.mmcpicv4` → `com.mmc.magicmicro.com.orderpic`
+(MainActivity moves to the matching directory). **Accepted consequence:**
+Android treats the result as a new app — Keystore-stored settings do not
+migrate, so the first-run setup gate re-triggers once, and the old app
+remains installed unless removed manually.
+
 ## Approaches weighed
 
 - **A — Extend the existing flow (chosen):** thread a `CaptureSession` through
