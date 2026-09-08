@@ -134,13 +134,17 @@ class _SettingsPageState extends State<SettingsPage> {
       }
       return; // stay on the page
     }
-    // copyWith reuses the upload half by instance, so a connection save
-    // never looks like an upload change (HomePage's remount key reads
-    // connection identity only). A ==-equal connection + unchanged
-    // upload makes the whole AppSettings ==-equal, and ValueNotifier
-    // then suppresses the notification entirely (no History rebuild).
-    widget.settingsNotifier.value = widget.settingsNotifier.value.copyWith(
-      connection: s,
+    // Instance discipline: HomePage's History remount key is
+    // ObjectKey(settings.connection), and ObjectKey compares with
+    // identical() — a fresh ==-equal connection instance would look
+    // like a change to that key. So when the form values are unchanged,
+    // reuse the LIVE connection instance; only a real change swaps
+    // identity. copyWith likewise preserves the upload half by instance,
+    // and a fully ==-equal AppSettings is dropped by ValueNotifier's
+    // == suppression (no History rebuild at all).
+    final current = widget.settingsNotifier.value;
+    widget.settingsNotifier.value = current.copyWith(
+      connection: s == current.connection ? current.connection : s,
     );
     if (mounted) Navigator.of(context).pop(true);
   }

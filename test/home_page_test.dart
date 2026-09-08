@@ -112,5 +112,25 @@ void main() {
       await tester.pump(); // remounted History's initState refresh settles
       expect(tester.state(historyPage()), isNot(same(before))); // remounted
     });
+
+    testWidgets('unchanged connection re-save does NOT remount History', (
+      tester,
+    ) async {
+      final notifier = await pumpAppWithHistoryVisited(tester);
+      final before = tester.state(historyPage());
+
+      // No-op re-save shape (SettingsPage._save with untouched form
+      // fields): copyWith() builds a FRESH ==-equal connection instance —
+      // instance identity WOULD differ, but the whole AppSettings is
+      // ==-equal (connection by value, upload same instance), so
+      // ValueNotifier suppresses the notification entirely: History
+      // neither rebuilds nor remounts. Pins the third leg of the
+      // invariant alongside the two above.
+      notifier.value = notifier.value.copyWith(
+        connection: notifier.value.connection.copyWith(),
+      );
+      await tester.pump();
+      expect(tester.state(historyPage()), same(before)); // not even rebuilt
+    });
   });
 }
