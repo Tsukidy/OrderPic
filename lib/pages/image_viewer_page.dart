@@ -16,7 +16,7 @@ class ImageViewerPage extends StatefulWidget {
   });
 
   final SmbFile file;
-  final ValueNotifier<SmbSettings> settingsNotifier;
+  final ValueNotifier<AppSettings> settingsNotifier;
 
   @override
   State<ImageViewerPage> createState() => _ImageViewerPageState();
@@ -33,7 +33,7 @@ class _ImageViewerPageState extends State<ImageViewerPage> {
   }
 
   Future<void> _load() async {
-    final s = widget.settingsNotifier.value;
+    final s = widget.settingsNotifier.value.connection;
     try {
       final conn = await connect(s);
       try {

@@ -1,9 +1,11 @@
 import 'settings_store.dart';
 
-/// SMB share settings. Credentials default to empty and are never
-/// compiled into the binary — the user enters them on first startup
-/// (settings persist via flutter_secure_storage).
-class SmbSettings {
+/// SMB share connection settings. Credentials default to empty and are
+/// never compiled into the binary — the user enters them on first startup
+/// (settings persist via flutter_secure_storage). Formerly `SmbSettings`;
+/// renamed when the upload preferences moved in beside it under
+/// [AppSettings] — keys and behavior are unchanged.
+class ConnectionSettings {
   final String host;
   final String
   sharePath; // <share>/<sub-folder> (sub-folder is created if missing)
@@ -11,7 +13,7 @@ class SmbSettings {
   final String username;
   final String password;
 
-  const SmbSettings({
+  const ConnectionSettings({
     required this.host,
     required this.sharePath,
     required this.domain,
@@ -20,7 +22,7 @@ class SmbSettings {
   });
 
   /// Seeds ONLY the non-secret fields; username/password stay empty (Q7).
-  static const SmbSettings defaults = SmbSettings(
+  static const ConnectionSettings defaults = ConnectionSettings(
     host: '192.168.1.29',
     sharePath: '/zdrive/InvoiceData',
     domain: '',
@@ -28,13 +30,13 @@ class SmbSettings {
     password: '',
   );
 
-  SmbSettings copyWith({
+  ConnectionSettings copyWith({
     String? host,
     String? sharePath,
     String? domain,
     String? username,
     String? password,
-  }) => SmbSettings(
+  }) => ConnectionSettings(
     host: host ?? this.host,
     sharePath: sharePath ?? this.sharePath,
     domain: domain ?? this.domain,
@@ -44,7 +46,7 @@ class SmbSettings {
 
   @override
   bool operator ==(Object other) =>
-      other is SmbSettings &&
+      other is ConnectionSettings &&
       other.host == host &&
       other.sharePath == sharePath &&
       other.domain == domain &&
@@ -57,13 +59,13 @@ class SmbSettings {
   /// Per-field fallback: config fields → defaults, credentials → empty.
   /// An unreadable/undecryptable store is wiped and falls back to
   /// defaults (the empty username then re-triggers first-run setup).
-  static Future<SmbSettings> load({
+  static Future<ConnectionSettings> load({
     SettingsStore store = const SecureSettingsStore(),
   }) async {
     try {
       Future<String> field(String key, String fallback) async =>
           (await store.read(key)) ?? fallback;
-      return SmbSettings(
+      return ConnectionSettings(
         host: await field('smb.host', defaults.host),
         sharePath: await field('smb.share_path', defaults.sharePath),
         domain: await field('smb.domain', defaults.domain),
@@ -89,6 +91,61 @@ class SmbSettings {
     await store.write('smb.username', username);
     await store.write('smb.password', password);
   }
+}
+
+/// Umbrella over everything the app persists: the SMB connection
+/// ([connection]) plus the capture/upload preferences ([upload]). Pages
+/// hold a single `ValueNotifier<AppSettings>`; SMB call sites read
+/// `.value.connection`. Equality spans BOTH halves — a host change and a
+/// folders-toggle change are equally "not the same settings" — but note
+/// that History's remount key deliberately tracks only [connection]
+/// identity (see HomePage): upload-only changes rebuild History in place
+/// instead of re-listing the share.
+class AppSettings {
+  final ConnectionSettings connection;
+  final UploadPrefs upload;
+
+  const AppSettings({required this.connection, required this.upload});
+
+  static const AppSettings defaults = AppSettings(
+    connection: ConnectionSettings.defaults,
+    upload: UploadPrefs.defaults,
+  );
+
+  /// Untouched halves are reused BY INSTANCE — ObjectKey compares with
+  /// identical(), and History's remount key is
+  /// ObjectKey(settings.connection), so an upload-only copyWith keeps the
+  /// same key (no History remount) while a connection change makes a new
+  /// one. Don't construct a fresh equal-valued half here.
+  AppSettings copyWith({ConnectionSettings? connection, UploadPrefs? upload}) =>
+      AppSettings(
+        connection: connection ?? this.connection,
+        upload: upload ?? this.upload,
+      );
+
+  /// Assembles the whole settings object; each half keeps its own
+  /// fallback/recovery behavior ([ConnectionSettings.load] wipes an
+  /// unreadable store, [UploadPrefs.load] just falls back to defaults).
+  static Future<AppSettings> load({
+    SettingsStore store = const SecureSettingsStore(),
+  }) async => AppSettings(
+    connection: await ConnectionSettings.load(store: store),
+    upload: await UploadPrefs.load(store: store),
+  );
+
+  Future<void> save({SettingsStore store = const SecureSettingsStore()}) async {
+    await connection.save(store: store);
+    await upload.save(store: store);
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is AppSettings &&
+      other.connection == connection &&
+      other.upload == upload;
+
+  @override
+  int get hashCode => Object.hash(connection, upload);
 }
 
 /// Output image format for uploads. PNG is lossless and full-size (the
@@ -167,8 +224,8 @@ class UploadPrefs {
   );
 
   /// Per-field fallback to [defaults]; unknown/unparseable values degrade
-  /// to the default rather than throwing. Unlike [SmbSettings.load] there
-  /// is no wipe — nothing here is a secret worth resetting setup over.
+  /// to the default rather than throwing. Unlike [ConnectionSettings.load]
+  /// there is no wipe — nothing here is a secret worth resetting setup over.
   static Future<UploadPrefs> load({
     SettingsStore store = const SecureSettingsStore(),
   }) async {

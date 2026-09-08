@@ -18,7 +18,7 @@ class HistoryPage extends StatefulWidget {
     this.active = true,
   });
 
-  final ValueNotifier<SmbSettings> settingsNotifier;
+  final ValueNotifier<AppSettings> settingsNotifier;
   final VoidCallback? onOpenSettings;
 
   /// True while this is the tab on screen. Flipping back to true (re-entering
@@ -34,8 +34,8 @@ class _HistoryPageState extends State<HistoryPage> {
   List<SmbFile>? _files;
   String? _error;
 
-  /// Settings snapshot the failed refresh used (shown in the error view).
-  SmbSettings? _errorSettings;
+  /// Connection snapshot the failed refresh used (shown in the error view).
+  ConnectionSettings? _errorSettings;
 
   @override
   void initState() {
@@ -54,7 +54,7 @@ class _HistoryPageState extends State<HistoryPage> {
   }
 
   Future<void> _refresh() async {
-    final s = widget.settingsNotifier.value;
+    final s = widget.settingsNotifier.value.connection;
     try {
       final conn = await connect(s);
       try {
@@ -154,7 +154,7 @@ class _HistoryPageState extends State<HistoryPage> {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              'Could not list \\\\${_errorSettings?.host ?? SmbSettings.defaults.host}${_errorSettings?.sharePath ?? SmbSettings.defaults.sharePath}\n\n$_error',
+              'Could not list \\\\${_errorSettings?.host ?? ConnectionSettings.defaults.host}${_errorSettings?.sharePath ?? ConnectionSettings.defaults.sharePath}\n\n$_error',
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 16),

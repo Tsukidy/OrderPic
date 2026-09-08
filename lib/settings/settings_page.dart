@@ -15,7 +15,7 @@ class SettingsPage extends StatefulWidget {
     this.store = const SecureSettingsStore(),
   });
 
-  final ValueNotifier<SmbSettings> settingsNotifier;
+  final ValueNotifier<AppSettings> settingsNotifier;
   final bool firstRun;
   final SettingsStore store;
 
@@ -35,7 +35,7 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   void initState() {
     super.initState();
-    final s = widget.settingsNotifier.value;
+    final s = widget.settingsNotifier.value.connection;
     _host = TextEditingController(text: s.host);
     _sharePath = TextEditingController(text: s.sharePath);
     _domain = TextEditingController(text: s.domain);
@@ -53,7 +53,7 @@ class _SettingsPageState extends State<SettingsPage> {
     super.dispose();
   }
 
-  SmbSettings _formSettings() => SmbSettings(
+  ConnectionSettings _formSettings() => ConnectionSettings(
     host: _host.text.trim(),
     sharePath: _sharePath.text.trim(),
     domain: _domain.text.trim(),
@@ -134,7 +134,14 @@ class _SettingsPageState extends State<SettingsPage> {
       }
       return; // stay on the page
     }
-    widget.settingsNotifier.value = s;
+    // copyWith reuses the upload half by instance, so a connection save
+    // never looks like an upload change (HomePage's remount key reads
+    // connection identity only). A ==-equal connection + unchanged
+    // upload makes the whole AppSettings ==-equal, and ValueNotifier
+    // then suppresses the notification entirely (no History rebuild).
+    widget.settingsNotifier.value = widget.settingsNotifier.value.copyWith(
+      connection: s,
+    );
     if (mounted) Navigator.of(context).pop(true);
   }
 

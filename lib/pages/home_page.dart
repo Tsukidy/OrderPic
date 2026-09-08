@@ -21,8 +21,8 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   late final SettingsStore _store;
-  final ValueNotifier<SmbSettings> _settingsNotifier = ValueNotifier(
-    SmbSettings.defaults,
+  final ValueNotifier<AppSettings> _settingsNotifier = ValueNotifier(
+    AppSettings.defaults,
   );
 
   int _tab = 0;
@@ -36,10 +36,10 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _loadSettings() async {
-    final s = await SmbSettings.load(store: _store); // recovery inside load()
+    final s = await AppSettings.load(store: _store); // recovery inside load()
     if (!mounted) return;
     _settingsNotifier.value = s;
-    if (s.username.isEmpty) {
+    if (s.connection.username.isEmpty) {
       // First-run gate — push once the frame is up.
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _openSettings(firstRun: true);
@@ -68,7 +68,7 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: ValueListenableBuilder<SmbSettings>(
+      body: ValueListenableBuilder<AppSettings>(
         valueListenable: _settingsNotifier,
         builder: (context, settings, _) => IndexedStack(
           index: _tab,
@@ -78,13 +78,17 @@ class _HomePageState extends State<HomePage> {
               settingsNotifier: _settingsNotifier,
               onOpenSettings: () => _openSettings(),
             ),
-            // Re-key on settings value: remount → initState → fresh list.
-            // Invariant: remount-on-change-ONLY relies on ObjectKey identity
-            // plus ValueNotifier suppressing ==-equal assignments (so a
-            // no-op re-save can't rebuild History). Don't "simplify" either.
+            // Re-key on CONNECTION value: remount → initState → fresh list.
+            // Invariant: the key intentionally tracks ONLY connection
+            // identity — ObjectKey(settings.connection) — so upload-pref
+            // changes never re-list History (they must reuse the same
+            // ConnectionSettings instance; AppSettings.copyWith does).
+            // ValueNotifier's == suppression still prevents a no-op
+            // re-save (whole AppSettings ==-equal) from rebuilding
+            // History at all. Don't "simplify" either.
             _historyVisited
                 ? KeyedSubtree(
-                    key: ObjectKey(settings),
+                    key: ObjectKey(settings.connection),
                     child: HistoryPage(
                       active: _tab == 1,
                       settingsNotifier: _settingsNotifier,

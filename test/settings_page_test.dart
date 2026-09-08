@@ -26,7 +26,9 @@ Future<void> _openSettings(WidgetTester tester, SettingsPage page) async {
 void main() {
   testWidgets('fields are seeded from current settings', (tester) async {
     final notifier = ValueNotifier(
-      SmbSettings.defaults.copyWith(username: 'tester'),
+      AppSettings.defaults.copyWith(
+        connection: ConnectionSettings.defaults.copyWith(username: 'tester'),
+      ),
     );
     await _openSettings(
       tester,
@@ -40,7 +42,9 @@ void main() {
   });
 
   testWidgets('password visibility toggle reveals text', (tester) async {
-    final notifier = ValueNotifier(SmbSettings.defaults);
+    final notifier = ValueNotifier(
+      AppSettings.defaults,
+    );
     await _openSettings(
       tester,
       SettingsPage(settingsNotifier: notifier, store: InMemorySettingsStore()),
@@ -71,7 +75,9 @@ void main() {
   });
 
   testWidgets('empty host is rejected', (tester) async {
-    final notifier = ValueNotifier(SmbSettings.defaults);
+    final notifier = ValueNotifier(
+      AppSettings.defaults,
+    );
     await _openSettings(
       tester,
       SettingsPage(settingsNotifier: notifier, store: InMemorySettingsStore()),
@@ -90,7 +96,9 @@ void main() {
   });
 
   testWidgets('share path without leading slash is rejected', (tester) async {
-    final notifier = ValueNotifier(SmbSettings.defaults);
+    final notifier = ValueNotifier(
+      AppSettings.defaults,
+    );
     await _openSettings(
       tester,
       SettingsPage(settingsNotifier: notifier, store: InMemorySettingsStore()),
@@ -106,7 +114,9 @@ void main() {
   });
 
   testWidgets('empty username is rejected', (tester) async {
-    final notifier = ValueNotifier(SmbSettings.defaults);
+    final notifier = ValueNotifier(
+      AppSettings.defaults,
+    );
     await _openSettings(
       tester,
       SettingsPage(settingsNotifier: notifier, store: InMemorySettingsStore()),
@@ -120,7 +130,9 @@ void main() {
 
   testWidgets('save persists, updates notifier, and pops', (tester) async {
     final store = InMemorySettingsStore();
-    final notifier = ValueNotifier(SmbSettings.defaults);
+    final notifier = ValueNotifier(
+      AppSettings.defaults,
+    );
     await _openSettings(
       tester,
       SettingsPage(settingsNotifier: notifier, store: store),
@@ -130,14 +142,16 @@ void main() {
     await tester.tap(find.text('Save'));
     await tester.pumpAndSettle();
     expect(find.byType(SettingsPage), findsNothing); // popped
-    expect(notifier.value.username, 'tester');
+    expect(notifier.value.connection.username, 'tester');
     expect(store.data['smb.username'], 'tester');
     expect(store.data['smb.password'], 'secret');
   });
 
   testWidgets('blank password is allowed', (tester) async {
     final store = InMemorySettingsStore();
-    final notifier = ValueNotifier(SmbSettings.defaults);
+    final notifier = ValueNotifier(
+      AppSettings.defaults,
+    );
     await _openSettings(
       tester,
       SettingsPage(settingsNotifier: notifier, store: store),
@@ -152,7 +166,9 @@ void main() {
   testWidgets('test connection shows guard wording when unconfigured', (
     tester,
   ) async {
-    final notifier = ValueNotifier(SmbSettings.defaults);
+    final notifier = ValueNotifier(
+      AppSettings.defaults,
+    );
     await _openSettings(
       tester,
       SettingsPage(settingsNotifier: notifier, store: InMemorySettingsStore()),
@@ -164,7 +180,9 @@ void main() {
   });
 
   testWidgets('back is blocked in first-run mode', (tester) async {
-    final notifier = ValueNotifier(SmbSettings.defaults);
+    final notifier = ValueNotifier(
+      AppSettings.defaults,
+    );
     // The gate hides the AppBar back arrow (it would be inert anyway), so
     // drive the system-back path directly — the same channel a hardware
     // back press / gesture uses.

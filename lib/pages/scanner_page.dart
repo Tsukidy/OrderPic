@@ -17,7 +17,7 @@ class ScannerPage extends StatefulWidget {
     this.paused = false,
   });
 
-  final ValueNotifier<SmbSettings> settingsNotifier;
+  final ValueNotifier<AppSettings> settingsNotifier;
   final VoidCallback? onOpenSettings;
 
   /// True while another tab is on top — pauses the camera.

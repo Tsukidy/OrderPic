@@ -19,7 +19,7 @@ class PreviewPage extends StatefulWidget {
 
   final String orderNumber;
   final String imagePath;
-  final ValueNotifier<SmbSettings> settingsNotifier;
+  final ValueNotifier<AppSettings> settingsNotifier;
 
   @override
   State<PreviewPage> createState() => _PreviewPageState();
@@ -43,7 +43,7 @@ class _PreviewPageState extends State<PreviewPage> {
     });
 
     try {
-      final s = widget.settingsNotifier.value;
+      final s = widget.settingsNotifier.value.connection;
       final bytes = await File(widget.imagePath).readAsBytes();
       final conn = await connect(s);
       try {

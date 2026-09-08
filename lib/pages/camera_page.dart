@@ -17,7 +17,7 @@ class CameraPage extends StatefulWidget {
   });
 
   final String orderNumber;
-  final ValueNotifier<SmbSettings> settingsNotifier;
+  final ValueNotifier<AppSettings> settingsNotifier;
 
   @override
   State<CameraPage> createState() => _CameraPageState();

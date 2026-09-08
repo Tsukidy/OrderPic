@@ -14,7 +14,7 @@ class SmbNotConfiguredException implements Exception {
 
 /// Opens an SMB connection with [s]. Every operation goes through here so
 /// the unconfigured guard and settings snapshot live in one place.
-Future<SmbConnect> connect(SmbSettings s) async {
+Future<SmbConnect> connect(ConnectionSettings s) async {
   if (s.username.isEmpty) throw SmbNotConfiguredException();
   return SmbConnect.connectAuth(
     host: s.host,
