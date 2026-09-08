@@ -1,10 +1,15 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
+import 'capture/session.dart';
 import 'pages/home_page.dart';
 import 'route_observer.dart';
 import 'settings/settings_store.dart';
 
 void main() {
+  // Reclaim session dirs orphaned by a crash/force-kill; never block startup.
+  unawaited(sweepStaleSessions());
   runApp(const OrderPicApp());
 }
 
