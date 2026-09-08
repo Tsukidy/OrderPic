@@ -16,10 +16,16 @@ class HistoryPage extends StatefulWidget {
     required this.settingsNotifier,
     this.onOpenSettings,
     this.active = true,
+    this.listDir,
   });
 
   final ValueNotifier<AppSettings> settingsNotifier;
   final VoidCallback? onOpenSettings;
+
+  /// Test seam: lists one directory's entries by path. Null (production) →
+  /// [_listDirReal] below; tests inject a fake returning hand-built
+  /// [SmbFile]s, so no widget test ever dials the share.
+  final Future<List<SmbFile>> Function(String path)? listDir;
 
   /// True while this is the tab on screen. Flipping back to true (re-entering
   /// the tab) re-lists the share, so uploads made since the last visit show
@@ -31,7 +37,10 @@ class HistoryPage extends StatefulWidget {
 }
 
 class _HistoryPageState extends State<HistoryPage> {
-  List<SmbFile>? _files;
+  /// Every entry in the listed directory — files AND folders; the build
+  /// splits them. (Attribute-based: a folder is whatever reports the
+  /// directory bit, never a name pattern.)
+  List<SmbFile>? _entries;
   String? _error;
 
   /// Connection snapshot the failed refresh used (shown in the error view).
@@ -53,25 +62,30 @@ class _HistoryPageState extends State<HistoryPage> {
     }
   }
 
+  /// Production listing: one fresh connection per directory listing.
+  /// [path] is any share-relative dir path, so folder listings (Task 5.2)
+  /// go through the exact same call.
+  Future<List<SmbFile>> _listDirReal(String path) async {
+    final s = widget.settingsNotifier.value.connection;
+    final conn = await connect(s);
+    try {
+      final folder = await conn.file(path);
+      return await conn.listFiles(folder);
+    } finally {
+      await conn.close();
+    }
+  }
+
   Future<void> _refresh() async {
     final s = widget.settingsNotifier.value.connection;
     try {
-      final conn = await connect(s);
-      try {
-        final folder = await conn.file(s.sharePath);
-        final entries = await conn.listFiles(folder);
-        // Names encode the capture time, so descending name order is
-        // newest-first.
-        entries.sort((a, b) => b.name.compareTo(a.name));
-        if (!mounted) return;
-        setState(() {
-          _files = entries.where((f) => _isImage(f.name)).toList();
-          _error = null;
-          _errorSettings = null;
-        });
-      } finally {
-        await conn.close();
-      }
+      final entries = await (widget.listDir ?? _listDirReal)(s.sharePath);
+      if (!mounted) return;
+      setState(() {
+        _entries = entries;
+        _error = null;
+        _errorSettings = null;
+      });
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -101,7 +115,7 @@ class _HistoryPageState extends State<HistoryPage> {
 
   @override
   Widget build(BuildContext context) {
-    final files = _files;
+    final entries = _entries;
     return Scaffold(
       appBar: AppBar(
         title: const Text('History'),
@@ -115,34 +129,59 @@ class _HistoryPageState extends State<HistoryPage> {
       ),
       body: _error != null
           ? _errorView()
-          : files == null
+          : entries == null
           ? const Center(child: CircularProgressIndicator())
-          : files.isEmpty
+          : entries.isEmpty
           ? const Center(child: Text('No images on the share yet.'))
-          : RefreshIndicator(
-              onRefresh: _refresh,
-              child: ListView.builder(
-                itemCount: files.length,
-                itemBuilder: (context, index) {
-                  final file = files[index];
-                  final parsed = parseUploadName(file.name);
-                  return ListTile(
-                    leading: const Icon(Icons.image_outlined),
-                    title: Text(parsed?.$1 ?? file.name),
-                    subtitle: parsed != null ? Text(parsed.$2) : null,
-                    trailing: Text(_formatSize(file.size)),
-                    onTap: () => Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => ImageViewerPage(
-                          file: file,
-                          settingsNotifier: widget.settingsNotifier,
-                        ),
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
+          : RefreshIndicator(onRefresh: _refresh, child: _entryList(entries)),
+    );
+  }
+
+  /// Folders first (order-number descending — highest first), then the
+  /// loose images exactly as before (newest-first via the name contract).
+  Widget _entryList(List<SmbFile> entries) {
+    final folders = entries.where((e) => e.isDirectory()).toList()
+      ..sort((a, b) => b.name.compareTo(a.name));
+    final files =
+        entries.where((e) => !e.isDirectory() && _isImage(e.name)).toList()
+          ..sort((a, b) => b.name.compareTo(a.name));
+
+    return ListView.builder(
+      itemCount: folders.length + files.length,
+      itemBuilder: (context, index) {
+        if (index < folders.length) {
+          return _folderTile(folders[index]);
+        }
+        return _imageTile(files[index - folders.length]);
+      },
+    );
+  }
+
+  Widget _folderTile(SmbFile folder) {
+    // TODO(5.2): drill down into this order folder — wire navigation here.
+    return ListTile(
+      leading: const Icon(Icons.folder),
+      title: Text(folder.name),
+      subtitle: const Text('Folder', style: TextStyle(color: Colors.grey)),
+      onTap: () {},
+    );
+  }
+
+  Widget _imageTile(SmbFile file) {
+    final parsed = parseUploadName(file.name);
+    return ListTile(
+      leading: const Icon(Icons.image_outlined),
+      title: Text(parsed?.$1 ?? file.name),
+      subtitle: parsed != null ? Text(parsed.$2) : null,
+      trailing: Text(_formatSize(file.size)),
+      onTap: () => Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => ImageViewerPage(
+            file: file,
+            settingsNotifier: widget.settingsNotifier,
+          ),
+        ),
+      ),
     );
   }
 
