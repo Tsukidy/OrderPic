@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
+import '../route_observer.dart';
 import '../settings/app_settings.dart';
 import 'camera_page.dart';
 
@@ -26,12 +27,28 @@ class ScannerPage extends StatefulWidget {
   State<ScannerPage> createState() => _ScannerPageState();
 }
 
-class _ScannerPageState extends State<ScannerPage> {
+class _ScannerPageState extends State<ScannerPage> with RouteAware {
   final MobileScannerController _controller = MobileScannerController(
     detectionSpeed: DetectionSpeed.noDuplicates,
   );
   final TextEditingController _entryController = TextEditingController();
   bool _processing = false;
+
+  // RouteAware: the camera must also stop while a route is pushed over the
+  // tab shell (Settings, the capture flow) — `paused` only covers tab
+  // switches. Subscribe in didChangeDependencies rather than initState:
+  // ModalRoute.of() is an inherited-widget lookup, which is not allowed
+  // before initState completes. Runs again when the ModalRoute dependency
+  // changes (never here: the page sits in an IndexedStack under one route),
+  // so double-subscription is not a concern; RouteAware re-subscription is
+  // additive anyway (a Set add).
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // ModalRoute.of returns ModalRoute<Object?>; this page only ever lives
+    // under the shell's MaterialPageRoute, so the downcast is safe.
+    routeObserver.subscribe(this, ModalRoute.of(context) as PageRoute);
+  }
 
   @override
   void didUpdateWidget(ScannerPage oldWidget) {
@@ -41,8 +58,32 @@ class _ScannerPageState extends State<ScannerPage> {
     }
   }
 
+  /// A page route was pushed on top of this one (Settings, CameraPage) —
+  /// stop the camera so the scanner can't fire while covered.
+  ///
+  /// Dialogs (showDialog) are popup routes and don't reach here; the QR
+  /// confirm dialog keeps relying on `_processing` + the explicit `stop()`
+  /// in `_onDetect`.
+  @override
+  void didPushNext() {
+    unawaited(_controller.stop());
+  }
+
+  /// The route above was popped — the scanner is visible again. Resume only
+  /// when the History tab isn't on top and no capture/dialog flow owns the
+  /// controller. When `_startCapture`'s awaited push returns right after
+  /// this (popUntil back from the flow), it does its own restart — starting
+  /// here as well would race it (`start()` throws if a start is pending).
+  @override
+  void didPopNext() {
+    if (!widget.paused && !_processing) {
+      unawaited(_controller.start());
+    }
+  }
+
   @override
   void dispose() {
+    routeObserver.unsubscribe(this);
     _controller.dispose();
     _entryController.dispose();
     super.dispose();
