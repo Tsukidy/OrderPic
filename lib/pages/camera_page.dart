@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../capture/image_processor.dart';
 import '../settings/app_settings.dart';
 import 'preview_page.dart';
 
@@ -38,10 +39,18 @@ class _CameraPageState extends State<CameraPage> {
     if (_launching) return;
     setState(() => _launching = true);
     try {
-      // No maxWidth/imageQuality — hand the original file to the uploader.
+      // JPEG quality presets are applied by image_picker itself; null
+      // maxWidth/imageQuality leaves the camera's bytes untouched (Original,
+      // and the whole PNG path — which needs the full-size JPEG to convert).
+      final prefs = widget.settingsNotifier.value.upload;
+      final params = prefs.format == ImageFormat.jpeg
+          ? jpegPickParams(prefs)
+          : null;
       final photo = await _picker.pickImage(
         source: ImageSource.camera,
         preferredCameraDevice: CameraDevice.rear,
+        maxWidth: sanitizeMaxEdge(params?.maxEdge)?.toDouble(),
+        imageQuality: params?.quality,
       );
       if (!mounted) return;
       if (photo != null) {
