@@ -4,8 +4,17 @@ import 'package:orderpic/settings/settings_store.dart';
 class InMemorySettingsStore implements SettingsStore {
   final Map<String, String> data = {};
 
+  /// When true, [read] throws — simulates an unreadable store
+  /// (e.g. undecryptable secure storage) without a separate class.
+  bool failReads = false;
+
   @override
-  Future<String?> read(String key) async => data[key];
+  Future<String?> read(String key) async {
+    if (failReads) {
+      throw Exception('unreadable');
+    }
+    return data[key];
+  }
 
   @override
   Future<void> write(String key, String value) async => data[key] = value;
