@@ -86,6 +86,7 @@ class _HomePageState extends State<HomePage> {
                 ? KeyedSubtree(
                     key: ObjectKey(settings),
                     child: HistoryPage(
+                      active: _tab == 1,
                       settingsNotifier: _settingsNotifier,
                       onOpenSettings: () => _openSettings(),
                     ),

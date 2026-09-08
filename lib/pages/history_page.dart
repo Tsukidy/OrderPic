@@ -15,10 +15,16 @@ class HistoryPage extends StatefulWidget {
     super.key,
     required this.settingsNotifier,
     this.onOpenSettings,
+    this.active = true,
   });
 
   final ValueNotifier<SmbSettings> settingsNotifier;
   final VoidCallback? onOpenSettings;
+
+  /// True while this is the tab on screen. Flipping back to true (re-entering
+  /// the tab) re-lists the share, so uploads made since the last visit show
+  /// up without a pull-to-refresh.
+  final bool active;
 
   @override
   State<HistoryPage> createState() => _HistoryPageState();
@@ -35,6 +41,16 @@ class _HistoryPageState extends State<HistoryPage> {
   void initState() {
     super.initState();
     unawaited(_refresh());
+  }
+
+  // The FIRST presentation initializes via initState; every later one arrives
+  // here as a false → true flip while the page stays mounted in the stack.
+  @override
+  void didUpdateWidget(HistoryPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.active && !oldWidget.active && mounted) {
+      unawaited(_refresh());
+    }
   }
 
   Future<void> _refresh() async {
