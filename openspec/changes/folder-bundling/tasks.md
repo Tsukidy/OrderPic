@@ -21,7 +21,7 @@
 - [x] 3.1 `capture/naming.dart` builder: `{Order}_{YYYYMMDD}_{HHMMSS}_{NNN}.{jpg|png}` — admission-time stamp, zero-padded 3-digit session index; unit tests (001 padding, same-second distinct indexes, extension per format)
 - [x] 3.2 History parser accepts legacy 3-part and new 4-part names into (order, readable time); unit tests incl. mixed-scheme newest-first ordering
 - [x] 3.3 `CaptureSession`/`Shot`: session-owned temp dir (`mmcpic-session-{order}-{epoch}`), `admit()` materializes the file and locks its final name, per-shot delete on upload success, dir removal when emptied, best-effort stale-session sweep at app start
-- [ ] 3.4 `ImageProcessor` seam + `flutter_image_compress` dependency (lossless PNG conversion); JPEG presets applied via image_picker `maxWidth`/`imageQuality` (Original = untouched bytes); processing failure rejects the shot with the batch intact — unit tests against a fake processor
+- [x] 3.4 `ImageProcessor` seam + `flutter_image_compress` dependency (lossless PNG conversion); JPEG presets applied via image_picker `maxWidth`/`imageQuality` (Original = untouched bytes); processing failure rejects the shot with the batch intact — unit tests against a fake processor
 
 ## 4. Upload flow
 
