@@ -20,12 +20,23 @@ String buildUploadFileName({
   return '${orderNumber}_${date}_${time}_$index.$ext';
 }
 
-/// Split ORDER_YYYYMMDD_HHMMSS.ext into (order, readable date/time).
+final _digits = RegExp(r'^\d+$');
+
+/// Split ORDER_YYYYMMDD_HHMMSS[_NNN].ext into (order, readable date/time).
+///
+/// Accepts the legacy 3-part shape and the current 4-part shape (the shot
+/// index is validated but not surfaced). Anything else — wrong part count,
+/// non-digit date/time segments, an index that isn't exactly 3 digits —
+/// returns null so callers fall back to the raw filename.
 (String, String)? parseUploadName(String name) {
   final dot = name.lastIndexOf('.');
   if (dot < 0) return null;
   final parts = name.substring(0, dot).split('_');
-  if (parts.length != 3 || parts[1].length != 8 || parts[2].length != 6) {
+  if (parts.length != 3 && parts.length != 4) return null;
+  if (parts[1].length != 8 || parts[2].length != 6) return null;
+  if (!_digits.hasMatch(parts[1]) || !_digits.hasMatch(parts[2])) return null;
+  if (parts.length == 4 &&
+      (parts[3].length != 3 || !_digits.hasMatch(parts[3]))) {
     return null;
   }
   final d = parts[1];
