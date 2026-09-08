@@ -35,7 +35,14 @@ class _PreviewPageState extends State<PreviewPage> {
   Future<void> _upload() async {
     if (_status == _UploadStatus.uploading) return;
 
-    final fileName = buildUploadFileName(widget.orderNumber, DateTime.now());
+    // TODO(task-4.3): capture-time naming — buildUploadFileName will move into
+    // CaptureSession; for now stamp at upload with a placeholder index/format.
+    final fileName = buildUploadFileName(
+      orderNumber: widget.orderNumber,
+      admittedAt: DateTime.now(),
+      shotIndex: 1,
+      format: ImageFormat.jpeg,
+    );
     setState(() {
       _status = _UploadStatus.uploading;
       _uploadedName = fileName;

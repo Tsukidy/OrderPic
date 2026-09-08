@@ -1,11 +1,23 @@
+import '../settings/app_settings.dart';
+
 String _twoDigits(int n) => n.toString().padLeft(2, '0');
 
-/// {OrderNumber}_{YYYYMMDD}_{HHMMSS}.jpg, stamped when the upload starts.
-String buildUploadFileName(String orderNumber, DateTime now) {
-  final date = '${now.year}${_twoDigits(now.month)}${_twoDigits(now.day)}';
-  final time =
-      '${_twoDigits(now.hour)}${_twoDigits(now.minute)}${_twoDigits(now.second)}';
-  return '${orderNumber}_${date}_$time.jpg';
+/// {OrderNumber}_{YYYYMMDD}_{HHMMSS}_{NNN}.{ext}, stamped when the capture
+/// is admitted; [shotIndex] disambiguates same-second shots.
+String buildUploadFileName({
+  required String orderNumber,
+  required DateTime admittedAt,
+  required int shotIndex,
+  required ImageFormat format,
+}) {
+  final date =
+      '${admittedAt.year}${_twoDigits(admittedAt.month)}${_twoDigits(admittedAt.day)}';
+  final time = '${_twoDigits(admittedAt.hour)}'
+      '${_twoDigits(admittedAt.minute)}'
+      '${_twoDigits(admittedAt.second)}';
+  final index = shotIndex.toString().padLeft(3, '0');
+  final ext = format == ImageFormat.png ? 'png' : 'jpg';
+  return '${orderNumber}_${date}_${time}_$index.$ext';
 }
 
 /// Split ORDER_YYYYMMDD_HHMMSS.ext into (order, readable date/time).
