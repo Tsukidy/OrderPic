@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../smb/smb.dart';
 import 'app_settings.dart';
@@ -34,12 +35,19 @@ class _SettingsPageState extends State<SettingsPage> {
   late final TextEditingController _password;
   bool _obscured = true;
 
-  // Capture & upload section. The quality knobs (Task 2.4) will join
-  // these; until then the quality fields ride through _save untouched
-  // from the live value.
+  // Capture & upload section. The quality block is only mounted while
+  // _format is JPEG (PNG is lossless — no quality knobs); its state
+  // lives here, so it survives the hide/show round-trip.
   late bool _folders;
   late bool _batch;
   late ImageFormat _format;
+  late JpegQuality _quality;
+
+  /// Controller for the custom max-long-edge field; hoisted to State so
+  /// dispose runs after the page's exit animation (dialog-controller
+  /// rule applies to pushed pages' TextFields too).
+  late final TextEditingController _customMaxEdge;
+  int _customQuality = 80; // clamped 30–100 at set-time (ledger, Task 2.1)
 
   @override
   void initState() {
@@ -54,6 +62,11 @@ class _SettingsPageState extends State<SettingsPage> {
     _folders = upload.useOrderFolders;
     _batch = upload.batchMode;
     _format = upload.format;
+    _quality = upload.jpegQuality;
+    _customQuality = upload.customQuality.clamp(30, 100);
+    _customMaxEdge = TextEditingController(
+      text: upload.customMaxEdgePx?.toString() ?? '',
+    );
   }
 
   @override
@@ -63,6 +76,7 @@ class _SettingsPageState extends State<SettingsPage> {
     _domain.dispose();
     _username.dispose();
     _password.dispose();
+    _customMaxEdge.dispose();
     super.dispose();
   }
 
@@ -137,14 +151,21 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<void> _save() async {
     if (!(_formKey.currentState?.validate() ?? false)) return;
     final s = _formSettings();
-    // Build the upload half from the form state. The quality fields
-    // aren't editable yet (Task 2.4) — copyWith them from the live value
-    // so an early save can't silently reset them to defaults.
     final current = widget.settingsNotifier.value;
-    final upload = current.upload.copyWith(
+    // Build the upload half from form state with ALL fields explicit.
+    // copyWith can't set customMaxEdgePx back to null (its ?? swallows
+    // the null), so a blanked field would ride through as the old cap —
+    // construct fresh instead (ledger, Task 2.1). Only the connection
+    // half carries the live-instance-reuse discipline; History's remount
+    // key doesn't read the upload half.
+    final t = _customMaxEdge.text.trim();
+    final upload = UploadPrefs(
       useOrderFolders: _folders,
       batchMode: _batch,
       format: _format,
+      jpegQuality: _quality,
+      customQuality: _customQuality.clamp(30, 100),
+      customMaxEdgePx: t.isEmpty ? null : int.tryParse(t),
     );
     try {
       await AppSettings(connection: s, upload: upload).save(
@@ -163,10 +184,11 @@ class _SettingsPageState extends State<SettingsPage> {
     // identical() — a fresh ==-equal connection instance would look
     // like a change to that key. So when the form values are unchanged,
     // reuse the LIVE connection instance; only a real change swaps
-    // identity. The upload half likewise keeps the live quality-field
-    // values by copyWith, and a fully ==-equal AppSettings is dropped
-    // by ValueNotifier's == suppression (no History rebuild at all) —
-    // an upload-only save rebuilds History in place, never remounts it.
+    // identity. The upload half is always built fresh from form state
+    // (History's key doesn't read it), and a fully ==-equal AppSettings
+    // is dropped by ValueNotifier's == suppression (no History rebuild
+    // at all) — an upload-only save rebuilds History in place, never
+    // remounts it.
     widget.settingsNotifier.value = current.copyWith(
       connection: s == current.connection ? current.connection : s,
       upload: upload,
@@ -224,6 +246,86 @@ class _SettingsPageState extends State<SettingsPage> {
                 onSelectionChanged: (selection) =>
                     setState(() => _format = selection.first),
               ),
+              // Quality only exists for JPEG — selecting PNG hides the
+              // whole block; the selection state lives in this State, so
+              // switching back restores it untouched.
+              if (_format == ImageFormat.jpeg) ...[
+                const SizedBox(height: 8),
+                Padding(
+                  key: const Key('quality_section'),
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SegmentedButton<JpegQuality>(
+                        key: const Key('quality_selector'),
+                        segments: const [
+                          ButtonSegment(
+                            value: JpegQuality.original,
+                            label: Text('Original'),
+                          ),
+                          ButtonSegment(
+                            value: JpegQuality.high,
+                            label: Text('High'),
+                          ),
+                          ButtonSegment(
+                            value: JpegQuality.balanced,
+                            label: Text('Balanced'),
+                          ),
+                          ButtonSegment(
+                            value: JpegQuality.small,
+                            label: Text('Small'),
+                          ),
+                          ButtonSegment(
+                            value: JpegQuality.custom,
+                            label: Text('Custom'),
+                          ),
+                        ],
+                        selected: {_quality},
+                        onSelectionChanged: (selection) =>
+                            setState(() => _quality = selection.first),
+                      ),
+                      if (_quality == JpegQuality.custom) ...[
+                        const SizedBox(height: 8),
+                        Column(
+                          key: const Key('custom_quality_controls'),
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'JPEG quality: $_customQuality',
+                              style: Theme.of(context).textTheme.bodyMedium,
+                            ),
+                            Slider(
+                              key: const Key('custom_quality_slider'),
+                              min: 30,
+                              max: 100,
+                              divisions: 70,
+                              value: _customQuality.clamp(30, 100).toDouble(),
+                              label: '$_customQuality',
+                              onChanged: (v) => setState(
+                                () => _customQuality = v.round(),
+                              ),
+                            ),
+                            TextFormField(
+                              key: const Key('custom_max_edge_field'),
+                              controller: _customMaxEdge,
+                              keyboardType: TextInputType.number,
+                              inputFormatters: [
+                                FilteringTextInputFormatter.digitsOnly,
+                              ],
+                              decoration: const InputDecoration(
+                                labelText: 'Max long edge, px (optional)',
+                                hintText:
+                                    'Blank = keep the original size',
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
               const SizedBox(height: 16),
               Text(
                 'SMB connection',

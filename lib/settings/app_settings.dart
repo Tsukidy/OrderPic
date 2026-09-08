@@ -268,3 +268,20 @@ class UploadPrefs {
     );
   }
 }
+
+/// Maps the saved JPEG preferences onto image_picker's re-encode
+/// parameters (quality / max long edge). Returns null when the capture
+/// must NOT be re-encoded: PNG format (lossless — the quality knobs
+/// don't apply) or JPEG quality [JpegQuality.original] (keep the
+/// camera's own encoding, full size). Otherwise the preset's fixed
+/// pair; [JpegQuality.custom] passes the stored numbers through.
+({int? quality, int? maxEdge})? jpegPickParams(UploadPrefs p) {
+  if (p.format != ImageFormat.jpeg) return null;
+  return switch (p.jpegQuality) {
+    JpegQuality.original => null,
+    JpegQuality.high => (quality: 90, maxEdge: null),
+    JpegQuality.balanced => (quality: 80, maxEdge: 2560),
+    JpegQuality.small => (quality: 70, maxEdge: 1080),
+    JpegQuality.custom => (quality: p.customQuality, maxEdge: p.customMaxEdgePx),
+  };
+}

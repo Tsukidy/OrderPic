@@ -24,11 +24,33 @@ Future<void> _openSettings(WidgetTester tester, SettingsPage page) async {
 }
 
 /// The sectioned page is taller than the default test surface — the
-/// Save/Test row lives below the fold. Scroll it into view before tapping.
-Future<void> _tapScrolled(WidgetTester tester, Finder finder) async {
-  await tester.ensureVisible(finder);
+/// Save/Test row and the lower connection fields live below the fold,
+/// and since Task 2.4's quality block grew the page further they sit
+/// beyond the ListView's lazy build extent (not mounted at all).
+/// scrollUntilVisible drives the scroll until the target is actually
+/// laid out on screen; ensureVisible alone can't reach unmounted
+/// elements.
+Future<void> _scrollTo(WidgetTester tester, Finder finder) async {
+  await tester.scrollUntilVisible(
+    finder,
+    250,
+    scrollable: find.byType(Scrollable).first,
+  );
   await tester.pumpAndSettle();
+}
+
+Future<void> _tapScrolled(WidgetTester tester, Finder finder) async {
+  await _scrollTo(tester, finder);
   await tester.tap(finder);
+}
+
+Future<void> _enterTextScrolled(
+  WidgetTester tester,
+  Finder finder,
+  String text,
+) async {
+  await _scrollTo(tester, finder);
+  await tester.enterText(finder, text);
 }
 
 void main() {
@@ -57,7 +79,11 @@ void main() {
       tester,
       SettingsPage(settingsNotifier: notifier, store: InMemorySettingsStore()),
     );
-    await tester.enterText(find.byKey(const Key('password_field')), 'secret');
+    await _enterTextScrolled(
+      tester,
+      find.byKey(const Key('password_field')),
+      'secret',
+    );
     // obscureText lives on the descendant TextField (TextFormField doesn't
     // expose it on Flutter 3.47), so assert against the TextField widget.
     final field = tester.widget<TextField>(
@@ -67,7 +93,7 @@ void main() {
       ),
     );
     expect(field.obscureText, isTrue);
-    await tester.tap(find.byIcon(Icons.visibility));
+    await _tapScrolled(tester, find.byIcon(Icons.visibility));
     await tester.pump();
     expect(
       tester
@@ -90,7 +116,7 @@ void main() {
       tester,
       SettingsPage(settingsNotifier: notifier, store: InMemorySettingsStore()),
     );
-    await tester.enterText(find.byKey(const Key('host_field')), '');
+    await _enterTextScrolled(tester, find.byKey(const Key('host_field')), '');
     await _tapScrolled(tester, find.text('Save'));
     await tester.pump();
     expect(
@@ -111,7 +137,8 @@ void main() {
       tester,
       SettingsPage(settingsNotifier: notifier, store: InMemorySettingsStore()),
     );
-    await tester.enterText(
+    await _enterTextScrolled(
+      tester,
       find.byKey(const Key('share_path_field')),
       'zdrive/x',
     );
@@ -129,7 +156,11 @@ void main() {
       tester,
       SettingsPage(settingsNotifier: notifier, store: InMemorySettingsStore()),
     );
-    await tester.enterText(find.byKey(const Key('username_field')), '');
+    await _enterTextScrolled(
+      tester,
+      find.byKey(const Key('username_field')),
+      '',
+    );
     await _tapScrolled(tester, find.text('Save'));
     await tester.pump();
     expect(find.text('Required'), findsAtLeastNWidgets(1));
@@ -145,8 +176,16 @@ void main() {
       tester,
       SettingsPage(settingsNotifier: notifier, store: store),
     );
-    await tester.enterText(find.byKey(const Key('username_field')), 'tester');
-    await tester.enterText(find.byKey(const Key('password_field')), 'secret');
+    await _enterTextScrolled(
+      tester,
+      find.byKey(const Key('username_field')),
+      'tester',
+    );
+    await _enterTextScrolled(
+      tester,
+      find.byKey(const Key('password_field')),
+      'secret',
+    );
     await _tapScrolled(tester, find.text('Save'));
     await tester.pumpAndSettle();
     expect(find.byType(SettingsPage), findsNothing); // popped
@@ -164,7 +203,11 @@ void main() {
       tester,
       SettingsPage(settingsNotifier: notifier, store: store),
     );
-    await tester.enterText(find.byKey(const Key('username_field')), 'tester');
+    await _enterTextScrolled(
+      tester,
+      find.byKey(const Key('username_field')),
+      'tester',
+    );
     await _tapScrolled(tester, find.text('Save'));
     await tester.pumpAndSettle();
     expect(find.byType(SettingsPage), findsNothing);
@@ -181,7 +224,11 @@ void main() {
       tester,
       SettingsPage(settingsNotifier: notifier, store: InMemorySettingsStore()),
     );
-    await tester.enterText(find.byKey(const Key('host_field')), '10.9.9.9');
+    await _enterTextScrolled(
+      tester,
+      find.byKey(const Key('host_field')),
+      '10.9.9.9',
+    );
     await _tapScrolled(tester, find.text('Test connection'));
     await tester.pump();
     expect(find.text(SmbNotConfiguredException.message), findsOneWidget);
@@ -344,5 +391,140 @@ void main() {
         expect(identical(notifier.value.connection, liveConnection), isTrue);
       },
     );
+  });
+
+  group('quality block', () {
+    testWidgets('visible for JPEG, hidden for PNG, selection survives', (
+      tester,
+    ) async {
+      final notifier = ValueNotifier(AppSettings.defaults);
+      await _openSettings(
+        tester,
+        SettingsPage(settingsNotifier: notifier, store: InMemorySettingsStore()),
+      );
+      // Default format is JPEG — the quality block is showing.
+      expect(find.byKey(const Key('quality_section')), findsOneWidget);
+      // Change the saved preset first so the restore assert is meaningful.
+      await _tapScrolled(tester, find.text('Balanced'));
+      await tester.pump();
+      // PNG hides the ENTIRE quality block.
+      await _tapScrolled(tester, find.text('PNG'));
+      await tester.pump();
+      expect(find.byKey(const Key('quality_section')), findsNothing);
+      // Back to JPEG: restored, still Balanced (state survived the round-trip).
+      await _tapScrolled(tester, find.text('JPEG'));
+      await tester.pump();
+      expect(find.byKey(const Key('quality_section')), findsOneWidget);
+      expect(
+        tester
+            .widget<SegmentedButton<JpegQuality>>(
+              find.byKey(const Key('quality_selector')),
+            )
+            .selected,
+        {JpegQuality.balanced},
+      );
+    });
+
+    testWidgets('custom reveals slider clamped 30-100 and persists via save', (
+      tester,
+    ) async {
+      final store = InMemorySettingsStore();
+      final notifier = ValueNotifier(
+        AppSettings.defaults.copyWith(
+          connection: ConnectionSettings.defaults.copyWith(username: 'tester'),
+        ),
+      );
+      await _openSettings(
+        tester,
+        SettingsPage(settingsNotifier: notifier, store: store),
+      );
+      // Custom controls hidden until Custom is selected.
+      expect(find.byKey(const Key('custom_quality_controls')), findsNothing);
+      await _tapScrolled(tester, find.text('Custom'));
+      await tester.pump();
+      expect(find.byKey(const Key('custom_quality_controls')), findsOneWidget);
+      final slider = tester.widget<Slider>(
+        find.byKey(const Key('custom_quality_slider')),
+      );
+      expect(slider.min, 30);
+      expect(slider.max, 100);
+      expect(slider.divisions, 70);
+      // Drag the thumb to the far left — the set-time clamp floor is 30
+      // (the slider's own min), so quality lands at 30, not 0.
+      final sliderRect = tester.getRect(
+        find.byKey(const Key('custom_quality_slider')),
+      );
+      await tester.dragFrom(
+        Offset(sliderRect.left + (sliderRect.width * 0.5), sliderRect.center.dy),
+        Offset(-sliderRect.width, 0),
+      );
+      await tester.pump();
+      await tester.enterText(
+        find.byKey(const Key('custom_max_edge_field')),
+        '2048',
+      );
+      await _tapScrolled(tester, find.text('Save'));
+      await tester.pumpAndSettle();
+      expect(find.byType(SettingsPage), findsNothing); // popped
+      expect(notifier.value.upload.jpegQuality, JpegQuality.custom);
+      expect(notifier.value.upload.customQuality, 30); // clamped at set-time
+      expect(notifier.value.upload.customMaxEdgePx, 2048);
+      // InMemory round-trip: what was saved is what loads back.
+      expect(await UploadPrefs.load(store: store), notifier.value.upload);
+    });
+
+    testWidgets('blanking the max edge clears it back to null on save', (
+      tester,
+    ) async {
+      final store = InMemorySettingsStore();
+      // copyWith can't set customMaxEdgePx back to null, so seed the whole
+      // upload half explicitly — the fresh-construction path under test.
+      final notifier = ValueNotifier(
+        AppSettings.defaults.copyWith(
+          connection: ConnectionSettings.defaults.copyWith(username: 'tester'),
+          upload: const UploadPrefs(
+            jpegQuality: JpegQuality.custom,
+            customQuality: 65,
+            customMaxEdgePx: 2048,
+          ),
+        ),
+      );
+      await _openSettings(
+        tester,
+        SettingsPage(settingsNotifier: notifier, store: store),
+      );
+      await tester.enterText(
+        find.byKey(const Key('custom_max_edge_field')),
+        '',
+      );
+      await _tapScrolled(tester, find.text('Save'));
+      await tester.pumpAndSettle();
+      expect(notifier.value.upload.customMaxEdgePx, isNull);
+      expect(store.data['upload.custom_max_edge'], '');
+      expect(await UploadPrefs.load(store: store), notifier.value.upload);
+    });
+
+    testWidgets('switching format to PNG and saving persists png', (
+      tester,
+    ) async {
+      final store = InMemorySettingsStore();
+      final notifier = ValueNotifier(
+        AppSettings.defaults.copyWith(
+          connection: ConnectionSettings.defaults.copyWith(username: 'tester'),
+        ),
+      );
+      await _openSettings(
+        tester,
+        SettingsPage(settingsNotifier: notifier, store: store),
+      );
+      await _tapScrolled(tester, find.text('PNG'));
+      await tester.pump();
+      expect(find.byKey(const Key('quality_section')), findsNothing);
+      await _tapScrolled(tester, find.text('Save'));
+      await tester.pumpAndSettle();
+      expect(find.byType(SettingsPage), findsNothing); // popped
+      expect(notifier.value.upload.format, ImageFormat.png);
+      expect(store.data['upload.format'], 'png');
+    });
   });
 }
