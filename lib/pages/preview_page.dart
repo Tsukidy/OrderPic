@@ -251,15 +251,24 @@ class _PreviewPageState extends State<PreviewPage> {
     );
   }
 
+  /// The batch-off order chip — styled exactly like the old page's chip
+  /// (and CameraPage's): regular weight, 16 px.
   Widget _qrChip() {
-    return _pill(
-      color: Colors.black54,
-      text: 'Order: ${widget.session.orderNumber}',
-      fontSize: 16,
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.black54,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Text(
+        'Order: ${widget.session.orderNumber}',
+        style: const TextStyle(color: Colors.white, fontSize: 16),
+      ),
     );
   }
 
   /// Batch-mode header: the order plus how many photos are staged so far.
+  /// Bold to stand apart from the plain single-shot chip.
   Widget _batchChip(int count) {
     final noun = count == 1 ? 'photo' : 'photos';
     return _pill(
@@ -270,8 +279,12 @@ class _PreviewPageState extends State<PreviewPage> {
   }
 
   /// Display-only thumbnails of every staged shot, oldest first; the
-  /// newest is highlighted.
+  /// newest is highlighted. Each tile caps the decode at the tile size ×
+  /// device pixel ratio — without [Image.file.cacheWidth] a 12 MP shot
+  /// decodes to ~48 MB of pixels per 56 px thumbnail (jank + memory
+  /// pressure once a batch grows).
   Widget _thumbStrip(List<Shot> shots) {
+    final cacheWidth = (56 * MediaQuery.devicePixelRatioOf(context)).round();
     return SizedBox(
       key: const Key('thumb_strip'),
       height: 72,
@@ -295,6 +308,7 @@ class _PreviewPageState extends State<PreviewPage> {
               File(shots[i].localPath),
               fit: BoxFit.cover,
               gaplessPlayback: true,
+              cacheWidth: cacheWidth,
             ),
           ),
         ),

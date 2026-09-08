@@ -139,7 +139,19 @@ class _ScannerPageState extends State<ScannerPage> with RouteAware {
   Future<void> _startCapture(String orderNumber) async {
     await _controller.stop();
     if (!mounted) return;
-    final session = await CaptureSession.create(orderNumber);
+    final CaptureSession session;
+    try {
+      session = await CaptureSession.create(orderNumber);
+    } catch (e) {
+      // A failed session create must not leave the scanner frozen with
+      // _processing stuck true — mirror the dialog-cancel path.
+      if (!mounted) return;
+      _processing = false;
+      unawaited(_controller.start());
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Could not start capture: $e')));
+      return;
+    }
     if (!mounted) return;
     await Navigator.of(context).push(
       MaterialPageRoute(
