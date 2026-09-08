@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:mmcpicv4/main.dart';
+import 'package:mmcpicv4/settings/app_settings.dart';
+import 'package:mmcpicv4/smb/smb.dart';
 
 import 'helpers/in_memory_settings_store.dart';
 
