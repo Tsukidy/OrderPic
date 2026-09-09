@@ -38,5 +38,5 @@
 ## 6. Verification & docs
 
 - [ ] 6.1 Device pass across all four toggle combinations end-to-end; PNG conversion with EXIF-orientation check (decision point: swap `ImageProcessor` to pure-Dart `image` if the plugin misbehaves — design D4 fallback); induced-failure retry-remaining on hardware
-- [ ] 6.2 CLAUDE.md updates: filename contract (new scheme + legacy note), "no resize/compression" line superseded by quality settings, architecture map post-split, app name OrderPic
+- [x] 6.2 CLAUDE.md updates: filename contract (new scheme + legacy note), "no resize/compression" line superseded by quality settings, architecture map post-split, app name OrderPic
 - [ ] 6.3 Full `flutter analyze` + `flutter test` green; final review of implementation against the six delta specs
