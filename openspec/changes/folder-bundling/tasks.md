@@ -42,5 +42,5 @@
 - [ ] 6.3 Full `flutter analyze` + `flutter test` green; final review of implementation against the six delta specs
 - [x] 6.4 (user-directed, from 6.1 device pass) Tappable thumbnails: tapping a strip thumbnail swaps the full-screen preview to that shot (view any batch shot, not just the last)
 - [x] 6.5 (user-directed, from 6.1 device pass) CameraPage becomes a transient launching state; backing out of the system camera cancels the capture and pops back to the scanner; the idle "Take a photo" screen with the manual Open camera button is removed
-- [ ] 6.6 (user-directed, from 6.1 device pass) Background PNG conversion: after a pick the shot appears as a pending thumbnail immediately; conversions run concurrently with capture; processing failures are flagged at review time for retake; Upload all waits for pending conversions
+- [x] 6.6 (user-directed, from 6.1 device pass) Background PNG conversion: after a pick the shot appears as a pending thumbnail immediately; conversions run concurrently with capture; processing failures are flagged at review time for retake; Upload all waits for pending conversions
 - [ ] 6.7 (user-directed, from 6.1 device pass) SMB write timeout: a stalled shot write fails after a bounded timeout into the existing per-shot failure path (Retry re-writes it — partial remote files get overwritten); upload UI never hangs on 0/N
