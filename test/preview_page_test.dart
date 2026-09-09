@@ -150,6 +150,27 @@ Future<void> _pumpPreview(
   await tester.pump();
 }
 
+/// The file backing the FULL-SCREEN preview. [Image.file] with no
+/// cacheWidth wraps its bytes in a bare [FileImage]; the thumbnails' decode
+/// cap wraps theirs in a [ResizeImage] — so this predicate matches the big
+/// image alone, and the assertion goes through the image's file path.
+File _fullScreenFile(WidgetTester tester) {
+  final img = tester.widget<Image>(
+    find.byWidgetPredicate((w) => w is Image && w.image is FileImage),
+  );
+  return (img.image as FileImage).file;
+}
+
+/// The strip's thumbnail [Image]s, oldest first.
+List<Image> _thumbs(WidgetTester tester) => tester
+    .widgetList<Image>(
+      find.descendant(
+        of: find.byKey(const Key('thumb_strip')),
+        matching: find.byType(Image),
+      ),
+    )
+    .toList();
+
 /// Copies the picked bytes into the session dir under the 4-part name —
 /// the same shape the real processor returns, minus any codec.
 class _CopyProcessor implements ImageProcessor {
@@ -271,6 +292,35 @@ void main() {
       await _pumpPreview(tester, session: session, batch: true);
 
       expect(find.text('Order: 100438 — 1 photo'), findsOneWidget);
+    });
+
+    testWidgets('default full-screen preview is the LAST shot; tapping the '
+        'first thumbnail shows THAT shot; tapping the last thumbnail goes '
+        'back', (tester) async {
+      final session = await _real(tester, () => _sessionOf('100438', 3));
+      final shots = session.shots.toList();
+      await _pumpPreview(tester, session: session, batch: true);
+
+      // Default: the newest shot fills the screen (today's behavior).
+      expect(_fullScreenFile(tester).path, shots.last.localPath);
+
+      // Tap the first thumbnail → shot 1 goes full-screen...
+      final stripTiles = find.descendant(
+        of: find.byKey(const Key('thumb_strip')),
+        matching: find.byType(GestureDetector),
+      );
+      await tester.tap(stripTiles.first);
+      await tester.pump();
+      expect(_fullScreenFile(tester).path, shots.first.localPath,
+          reason: 'the tapped thumbnail becomes the reviewed shot');
+
+      // ...and tapping the last thumbnail is the way back to the newest.
+      await tester.tap(stripTiles.last);
+      await tester.pump();
+      expect(_fullScreenFile(tester).path, shots.last.localPath);
+
+      // The strip still shows all three thumbnails, untouched.
+      expect(_thumbs(tester), hasLength(3));
     });
 
     testWidgets('Upload all → uploader called once with the session; '

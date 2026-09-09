@@ -7,8 +7,10 @@ import '../capture/uploader.dart';
 import '../settings/app_settings.dart';
 import 'camera_page.dart';
 
-/// Stage 3 — review the newest photo of the session, then retake it, add
-/// more (batch mode), or upload every staged shot to the SMB share.
+/// Stage 3 — review the shots of the session, then retake the newest one,
+/// add more (batch mode), or upload every staged shot to the SMB share.
+/// Batch mode shows the strip: tapping a thumbnail reviews that shot
+/// full-screen (default = the newest).
 ///
 /// The upload itself lives in [uploadSession] (Task 4.1); this page only
 /// owns the state machine around it. [PreviewPage.uploader] is the test
@@ -45,6 +47,13 @@ enum _UploadStatus { idle, uploading, done, failed }
 class _PreviewPageState extends State<PreviewPage> {
   _UploadStatus _status = _UploadStatus.idle;
 
+  /// The staged shot the full-screen preview shows — null means "newest"
+  /// (today's behavior). A thumbnail tap pins the index; returning to the
+  /// last shot is tapping its thumbnail again. Every new admission, the
+  /// Retake rollback, and the upload-completion state all fall back here,
+  /// so the selection is only ever a review-time view.
+  int? _selectedIndex;
+
   /// The file name shown by the batch-off done banner (the session's last
   /// uploaded shot) — 'Uploaded: {fileName}' preserves today's shape.
   String? _uploadedName;
@@ -79,6 +88,7 @@ class _PreviewPageState extends State<PreviewPage> {
       _total = widget.session.shots.length;
       _summary = null;
       _error = null;
+      _selectedIndex = null; // working set is about to be re-cut — newest again
     });
 
     try {
@@ -134,6 +144,10 @@ class _PreviewPageState extends State<PreviewPage> {
       final shot = widget.session.removeLast();
       if (shot != null) await widget.session.deleteLocal(shot);
     }
+    // The thumbnail selection is review-time state only: Retake must not
+    // keep pointing at a dropped index, and coming back from the camera
+    // should present the newly admitted (last) shot either way.
+    _selectedIndex = null;
     if (!mounted) return;
     await Navigator.of(context).pushReplacement(
       MaterialPageRoute(
@@ -177,7 +191,11 @@ class _PreviewPageState extends State<PreviewPage> {
   @override
   Widget build(BuildContext context) {
     final shots = widget.session.shots;
-    if (shots.isNotEmpty) _lastShownPath = shots.last.localPath;
+    if (shots.isNotEmpty) {
+      final sel = _selectedIndex;
+      final selected = (sel != null && sel < shots.length) ? shots[sel] : shots.last;
+      _lastShownPath = selected.localPath;
+    }
     final shownPath = _lastShownPath;
 
     return Scaffold(
@@ -278,13 +296,15 @@ class _PreviewPageState extends State<PreviewPage> {
     );
   }
 
-  /// Display-only thumbnails of every staged shot, oldest first; the
-  /// newest is highlighted. Each tile caps the decode at the tile size ×
-  /// device pixel ratio — without [Image.file.cacheWidth] a 12 MP shot
-  /// decodes to ~48 MB of pixels per 56 px thumbnail (jank + memory
-  /// pressure once a batch grows).
+  /// Thumbnails of every staged shot, oldest first; the one shown
+  /// full-screen is highlighted, and tapping a tile makes IT the
+  /// full-screen shot (tapping the newest's tile is the way back).
+  /// Each tile caps the decode at the tile size × device pixel ratio —
+  /// without [Image.file.cacheWidth] a 12 MP shot decodes to ~48 MB of
+  /// pixels per 56 px thumbnail (jank + memory pressure once a batch grows).
   Widget _thumbStrip(List<Shot> shots) {
     final cacheWidth = (56 * MediaQuery.devicePixelRatioOf(context)).round();
+    final selected = _selectedIndex ?? shots.length - 1;
     return SizedBox(
       key: const Key('thumb_strip'),
       height: 72,
@@ -292,23 +312,26 @@ class _PreviewPageState extends State<PreviewPage> {
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         itemCount: shots.length,
-        itemBuilder: (context, i) => Container(
-          width: 56,
-          height: 56,
-          decoration: BoxDecoration(
-            border: Border.all(
-              color: i == shots.length - 1 ? Colors.white : Colors.white30,
-              width: 2,
+        itemBuilder: (context, i) => GestureDetector(
+          onTap: () => setState(() => _selectedIndex = i),
+          child: Container(
+            width: 56,
+            height: 56,
+            decoration: BoxDecoration(
+              border: Border.all(
+                color: i == selected ? Colors.white : Colors.white30,
+                width: 2,
+              ),
+              borderRadius: BorderRadius.circular(4),
             ),
-            borderRadius: BorderRadius.circular(4),
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(2),
-            child: Image.file(
-              File(shots[i].localPath),
-              fit: BoxFit.cover,
-              gaplessPlayback: true,
-              cacheWidth: cacheWidth,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(2),
+              child: Image.file(
+                File(shots[i].localPath),
+                fit: BoxFit.cover,
+                gaplessPlayback: true,
+                cacheWidth: cacheWidth,
+              ),
             ),
           ),
         ),
