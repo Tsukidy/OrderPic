@@ -86,6 +86,12 @@ class CaptureSession extends ChangeNotifier {
   /// The shot index to stamp into the next file name (1-based). Counts
   /// every staged entry — including PENDING ones, so a quick follow-up
   /// pick reserves the next index before the previous conversion ends.
+  ///
+  /// Removing a MIDDLE entry (only possible for a conversion-failed one,
+  /// via the review page) means the next admission reuses its NNN: a
+  /// numbering gap plus the same index appearing twice across seconds.
+  /// Known and harmless — the per-shot timestamp in the name keeps every
+  /// filename unique.
   int get nextIndex => _shots.length + 1;
 
   /// Staged shots whose conversion is still in flight.
@@ -143,6 +149,12 @@ class CaptureSession extends ChangeNotifier {
   /// a file whose entry was removed mid-conversion (a retake may already
   /// have re-reserved the same name for a replacement shot).
   bool claimsFile(String fileName) => _shots.any((s) => s.fileName == fileName);
+
+  /// [claimsFile] ignoring [shot] itself — for the failure path, where the
+  /// still-staged failing entry trivially claims its own name but a
+  /// partial file under it must still be cleaned up.
+  bool claimsFileExcluding(Shot shot) =>
+      _shots.any((s) => s.fileName == shot.fileName && !identical(s, shot));
 
   /// Removes the session dir (recursively) iff no shots remain staged —
   /// PENDING entries count as staged, so a dir never vanishes under an

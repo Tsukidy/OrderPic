@@ -120,8 +120,11 @@ class Admission {
 /// upload skips it). If the entry was removed mid-conversion (a retake
 /// cancelled it) the just-written bytes are dropped — unless the name was
 /// re-reserved by a replacement shot, in which case the file is left for
-/// that shot's own conversion to own (a late straggler may overwrite it;
-/// the startup sweep catches anything left behind).
+/// that shot's own conversion to own. A straggler finishing after the
+/// replacement's own conversion would overwrite it with THIS pick's bytes
+/// (clock-gated to practical unreachability: a same-second collision
+/// needs a full camera round trip inside 1 s); the startup sweep catches
+/// anything left behind.
 Admission admitPicked({
   required String pickedPath,
   required UploadPrefs prefs,
@@ -155,7 +158,13 @@ Future<void> _settleAdmission(
     }
     // Entry removed while converting (retake cancelled it). Drop the bytes
     // we just wrote — unless a replacement shot re-reserved the name, in
-    // which case the path is that shot's now.
+    // which case the path is that replacement's now. A straggler over-
+    // writing it is clock-gated to practical unreachability (a same-second
+    // name collision needs a full camera round trip inside one second) —
+    // but the bytes would be THIS pick's, not the replacement's, so the
+    // replacement entry could end up describing another photo's file. The
+    // entry-removal check above runs at settle time, and anything left
+    // behind (locked file, mid-write kill) is swept at the next startup.
     if (!session.claimsFile(pending.fileName)) {
       try {
         final f = File(pending.localPath);
@@ -166,7 +175,20 @@ Future<void> _settleAdmission(
     }
   } catch (_) {
     // Conversion failed: flag the entry, keep it staged for retake. The
-    // batch (and every other conversion) is untouched.
+    // batch (and every other conversion) is untouched. A codec that threw
+    // AFTER a partial write leaves a partial file behind — drop it so the
+    // retake starts from a clean dir. The failing entry is still staged
+    // (and claims its own name) until the replace below, so the claim
+    // check must ignore it: cleanup happens only when no OTHER entry
+    // re-reserved the name.
+    if (!session.claimsFileExcluding(pending)) {
+      try {
+        final f = File(pending.localPath);
+        if (await f.exists()) await f.delete();
+      } catch (_) {
+        /* best effort — the startup sweep catches stragglers */
+      }
+    }
     session.replace(pending, pending.copyWith(status: ShotStatus.failed));
   }
 }

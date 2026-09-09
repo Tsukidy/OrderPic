@@ -240,6 +240,28 @@ void main() {
           reason: 'the failed conversion left no half-written file');
     });
 
+    test('a codec failing AFTER a partial write leaves no partial file '
+        'behind (unclaimed bytes are cleaned up before flagging)',
+        () async {
+      final session = await CaptureSession.create('100438');
+      _created.add(session.dir);
+      final picked = _picked(_plant('mmcpic-pick-src').path, 'IMG_0001.jpg');
+
+      final admission = admitPicked(
+        pickedPath: picked.path,
+        prefs: UploadPrefs.defaults,
+        session: session,
+        processor: const _PartialWriteProcessor(),
+      );
+      await admission.settled;
+
+      expect(session.shots.single.status, ShotStatus.failed);
+      expect(File(admission.pending.localPath).existsSync(), isFalse,
+          reason: 'the partial bytes of the failed conversion are dropped '
+              '— the retake must start from a clean dir');
+      expect(session.dir.listSync().whereType<File>(), isEmpty);
+    });
+
     test('a conversion settling after its entry was removed (retake '
         'cancel) leaves the session alone and drops the written file',
         () async {
@@ -350,4 +372,19 @@ class ThrowingProcessor implements ImageProcessor {
     required String pickedPath,
     required String destPath,
   }) async => throw Exception('codec failed for $pickedPath');
+}
+
+/// Writes a partial file FIRST, THEN throws — the codec-dies-mid-write
+/// shape. The settle path must clean the unclaimed bytes up.
+class _PartialWriteProcessor implements ImageProcessor {
+  const _PartialWriteProcessor();
+
+  @override
+  Future<void> process({
+    required String pickedPath,
+    required String destPath,
+  }) async {
+    await File(destPath).writeAsBytes([1, 2, 3], flush: true);
+    throw Exception('codec died mid-write for $pickedPath');
+  }
 }

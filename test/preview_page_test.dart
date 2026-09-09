@@ -704,16 +704,12 @@ void main() {
       final readyShots = session.shots.toList();
       final picked = await _real(tester, () => _pickedFile('IMG_0003.jpg'));
 
-      final admission = admitPicked(
+      admitPicked(
         pickedPath: picked.path,
         prefs: _settings(batch: true).upload,
         session: session,
         processor: const _ThrowingProcessor(),
       );
-      await admission.settled;
-      final failed = session.shots.last;
-      expect(failed.status, ShotStatus.failed);
-
       final fake = _FakeUploader()..next.add(_summary(readyShots));
       await _pumpPreview(
         tester,
@@ -721,10 +717,19 @@ void main() {
         batch: true,
         uploader: fake.call,
       );
+      // The settle path touches real IO (the partial-write cleanup's
+      // exists/delete) — drive it with real rounds; the banner appearing
+      // proves the entry settled to failed.
+      await _ioSettle(
+        tester,
+        () => session.shots.last.status == ShotStatus.failed &&
+            find.byKey(const Key('conversion_banner')).evaluate().isNotEmpty,
+      );
 
       expect(find.byKey(const Key('thumb_failed_2')), findsOneWidget,
           reason: 'the failed tile shows the error tint');
       expect(find.byKey(const Key('conversion_banner')), findsOneWidget);
+      final failed = session.shots.last;
       expect(
         find.descendant(
           of: find.byKey(const Key('conversion_banner')),
@@ -756,14 +761,24 @@ void main() {
       final readyShot = session.shots.single;
       final picked = await _real(tester, () => _pickedFile('IMG_0002.jpg'));
 
-      final admission = admitPicked(
+      admitPicked(
         pickedPath: picked.path,
         prefs: _settings(batch: true).upload,
         session: session,
         processor: const _ThrowingProcessor(),
       );
-      await admission.settled;
       final failed = session.shots.last;
+
+      await _pumpPreview(tester, session: session, batch: true);
+
+      // The settle path touches real IO (the partial-write cleanup's
+      // exists/delete) — drive it with real rounds until the entry has
+      // settled to failed (the error tile proves it).
+      await _ioSettle(
+        tester,
+        () => session.shots.last.status == ShotStatus.failed &&
+            find.byKey(const Key('thumb_failed_1')).evaluate().isNotEmpty,
+      );
 
       await _pumpPreview(tester, session: session, batch: true);
 

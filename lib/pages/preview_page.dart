@@ -253,6 +253,10 @@ class _PreviewPageState extends State<PreviewPage> {
   /// newest: drops exactly that entry and relaunches the camera on the
   /// same session so the replacement reuses its slot number.
   Future<void> _retakeShot(Shot failed) async {
+    // Same gate disarm as [_openCamera]: if a pending conversion settles
+    // during the awaits below, the auto-start must not fire into a page
+    // that is mid-navigation.
+    if (_status == _UploadStatus.waiting) _status = _UploadStatus.idle;
     await widget.session.deleteLocal(failed);
     _selectedIndex = null;
     if (!mounted) return;
