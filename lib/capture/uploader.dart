@@ -1,9 +1,30 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
 import '../settings/app_settings.dart';
 import '../smb/smb.dart';
 import 'session.dart';
+
+/// Bounds ONE shot's write phase (createFile → openWrite → add → flush →
+/// close). smb_connect's sink has no socket-level write timeout, so a
+/// connection dropped mid-write leaves the await pending forever — this
+/// fails the shot into the retry path instead. Per-shot on purpose: a whole
+/// batch of slow-but-progressing writes must not fail, and 30s for one photo
+/// on a LAN is generous.
+const Duration smbWriteTimeout = Duration(seconds: 30);
+
+/// Bound on the best-effort connection close in `uploadSession`'s `finally`.
+/// After a stalled write the transport's send mutex can stay held, and
+/// `conn.close()` (session logoff → sendrecv) would then wait on it forever —
+/// the very hang this file exists to prevent.
+const Duration _connCloseTimeout = Duration(seconds: 5);
+
+/// User-readable text for a shot that outlived [smbWriteTimeout]. Sub-second
+/// durations (tests) render as ms.
+String _writeTimeoutMessage(Duration d) => d.inSeconds >= 1
+    ? 'Write timed out after ${d.inSeconds}s'
+    : 'Write timed out after ${d.inMilliseconds}ms';
 
 /// Writes one shot's bytes to [remotePath]. The production writer opens the
 /// file on the shared SMB connection; tests inject a recording fake instead.
@@ -75,6 +96,11 @@ String uploadTargetPath({
 /// all uploaded has its temp dir reclaimed via
 /// [CaptureSession.cleanupIfEmpty] (a session still holding staged entries
 /// — e.g. a flagged failed conversion — keeps its dir).
+///
+/// Each shot's write is bounded by [writeTimeout] (default
+/// [smbWriteTimeout]): a stalled write fails that shot with a
+/// "Write timed out" error instead of hanging the batch, and later shots
+/// still get their outcomes. [writeTimeout] is injectable for tests.
 Future<UploadSummary> uploadSession(
   CaptureSession session,
   AppSettings settings, {
@@ -82,7 +108,9 @@ Future<UploadSummary> uploadSession(
   ShotWriter? writeShot,
   FolderEnsurer? ensureFolder,
   void Function(int done, int total)? onProgress,
+  Duration? writeTimeout,
 }) async {
+  final timeout = writeTimeout ?? smbWriteTimeout;
   // Injections replace the connection AND the writer — never open a
   // connection that nothing will use.
   if (writeShot != null) {
@@ -93,13 +121,34 @@ Future<UploadSummary> uploadSession(
       writer: writeShot,
       ensurer: ensureFolder,
       onProgress: onProgress,
+      writeTimeout: timeout,
     );
   }
 
   final conn = await connect(settings.connection);
   try {
     Future<void> defaultWriter(String remotePath, Uint8List bytes) async {
-      final remoteFile = await conn.createFile(remotePath);
+      dynamic remoteFile;
+      try {
+        remoteFile = await conn.createFile(remotePath);
+      } catch (_) {
+        // smb1 dialects open with O_CREAT|O_EXCL → FILE_CREATE, which FAILS
+        // when the name already exists — a partial file left by a previous
+        // timed-out attempt is exactly that. Probe + delete + re-create so
+        // Retry overwrites; smb2's FILE_OPEN_IF (the normal dialect against
+        // Windows shares) succeeds on the first call and never lands here.
+        // If recovery itself fails, that error propagates — the shot fails
+        // into the retry path either way.
+        final existing = await conn.file(remotePath);
+        if (existing.isExists) {
+          try {
+            await conn.delete(existing);
+          } catch (_) {
+            // Best-effort — the re-create below surfaces the real error.
+          }
+        }
+        remoteFile = await conn.createFile(remotePath);
+      }
       final sink = await conn.openWrite(remoteFile);
       sink.add(bytes);
       await sink.flush();
@@ -123,15 +172,22 @@ Future<UploadSummary> uploadSession(
       writer: defaultWriter,
       ensurer: ensureFolder ?? defaultEnsure,
       onProgress: onProgress,
+      writeTimeout: timeout,
     );
   } finally {
-    await conn.close();
+    // Best-effort: after a timed-out write the transport's send mutex may
+    // never be released, so the logoff in close() can block forever — the
+    // UI must not wait on it. (SmbConnect.close → tree.close → session
+    // logoff → sendrecv, all behind sendrecvMutex.)
+    await conn.close().timeout(_connCloseTimeout).catchError((_) {});
   }
 }
 
 /// The per-shot loop shared by the default and injected paths. [ensurer] is
 /// always resolvable here and its errors are swallowed — folder creation is
-/// never worth failing a shot over.
+/// never worth failing a shot over. Each shot's write phase is bounded by
+/// [writeTimeout]; a timeout fails only that shot (kept staged for retry)
+/// and the remaining shots still get their outcomes.
 Future<UploadSummary> _runAll(
   CaptureSession session,
   AppSettings settings, {
@@ -139,6 +195,7 @@ Future<UploadSummary> _runAll(
   required ShotWriter writer,
   required FolderEnsurer? ensurer,
   void Function(int done, int total)? onProgress,
+  required Duration writeTimeout,
 }) async {
   final c = settings.connection;
   final u = settings.upload;
@@ -171,9 +228,19 @@ Future<UploadSummary> _runAll(
         orderNumber: session.orderNumber,
         fileName: shot.fileName,
       );
-      await writer(target, bytes);
+      await writer(target, bytes).timeout(
+        writeTimeout,
+        onTimeout: () => throw TimeoutException(
+          _writeTimeoutMessage(writeTimeout),
+        ),
+      );
       await session.deleteLocal(shot);
       outcome = UploadOutcome(shot, true, null);
+    } on TimeoutException catch (e) {
+      // Stalled write — same handling as any other failure (kept staged,
+      // batch continues) but with the user-readable timeout message rather
+      // than a bare "TimeoutException: ...".
+      outcome = UploadOutcome(shot, false, e.message ?? e.toString());
     } catch (e) {
       // Kept staged — a later retry pass can re-upload it.
       outcome = UploadOutcome(shot, false, e.toString());

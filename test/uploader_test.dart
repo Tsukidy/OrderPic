@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -377,6 +378,170 @@ void main() {
         expect(summary.allOk, isFalse);
         expect(summary.remaining, shots);
         expect(session.shots, shots);
+      });
+    });
+
+    group('per-shot write timeout', () {
+      test('default timeout is 30s per shot', () {
+        expect(smbWriteTimeout, const Duration(seconds: 30));
+      });
+
+      test('a stalled write fails that shot with the timeout message, later '
+          'shots still attempted, hung shot stays staged (== remaining)',
+          () async {
+        final session = await _session('100438', [
+          '100438_20260908_101112_1.jpg',
+          '100438_20260908_101113_2.jpg',
+          '100438_20260908_101114_3.jpg',
+        ]);
+        final shots = session.shots.toList();
+        final rec = _Recorder();
+
+        // Shot 1 never completes — the connection dropped mid-write.
+        // Shots 2 and 3 succeed, proving the batch survives the stall.
+        final firstWrite = Completer<void>();
+        var calls = 0;
+        Future<void> writer(String remotePath, Uint8List bytes) {
+          calls += 1;
+          if (calls == 1) return firstWrite.future;
+          return rec.writeShot(remotePath, bytes);
+        }
+
+        final summary = await uploadSession(
+          session,
+          _settings(folders: true),
+          writeShot: writer,
+          ensureFolder: rec.ensureFolder,
+          onProgress: rec.onProgress,
+          writeTimeout: const Duration(milliseconds: 100),
+        );
+
+        expect(calls, 3,
+            reason: 'a hung shot must not block the rest of the batch');
+        expect(summary.outcomes[0].ok, isFalse);
+        expect(summary.outcomes[0].error, 'Write timed out after 100ms');
+        expect(summary.outcomes[1].ok, isTrue);
+        expect(summary.outcomes[2].ok, isTrue);
+        expect(summary.allOk, isFalse);
+        expect(summary.uploadedCount, 2);
+        expect(summary.remaining, [shots[0]],
+            reason: 'the hung shot stays staged for Retry');
+        expect(File(shots[0].localPath).existsSync(), isTrue,
+            reason: 'timed-out shot is NOT deleted locally');
+        expect(File(shots[1].localPath).existsSync(), isFalse);
+        expect(File(shots[2].localPath).existsSync(), isFalse);
+        expect(rec.writes, hasLength(2),
+            reason: 'only the two real writes were recorded');
+        expect(rec.progress, [
+          (done: 1, total: 3),
+          (done: 2, total: 3),
+          (done: 3, total: 3),
+        ]);
+        expect(session.dir.existsSync(), isTrue,
+            reason: 'a staged shot remains — no cleanup');
+        // The writer's future is abandoned, not awaited to completion.
+        expect(firstWrite.isCompleted, isFalse);
+      });
+
+      test('Retry after a timeout re-uploads the hung shot and succeeds',
+          () async {
+        final session = await _session('100438', [
+          '100438_20260908_101112_1.jpg',
+          '100438_20260908_101113_2.jpg',
+        ]);
+        final shot1 = session.shots[0];
+        final rec = _Recorder();
+
+        final firstWrite = Completer<void>();
+        var calls = 0;
+        Future<void> writer(String remotePath, Uint8List bytes) {
+          calls += 1;
+          if (calls == 1) return firstWrite.future;
+          return rec.writeShot(remotePath, bytes);
+        }
+
+        final first = await uploadSession(
+          session,
+          _settings(folders: true),
+          writeShot: writer,
+          ensureFolder: rec.ensureFolder,
+          writeTimeout: const Duration(milliseconds: 100),
+        );
+
+        expect(first.outcomes[0].ok, isFalse);
+        expect(first.outcomes[0].error, 'Write timed out after 100ms');
+        expect(first.outcomes[1].ok, isTrue,
+            reason: 'the shot after the hung one still uploaded');
+        expect(first.remaining, [shot1]);
+        expect(session.shots, [shot1]);
+
+        // Retry pass: only the still-staged shot is re-uploaded (the review
+        // page passes the remaining entries verbatim).
+        final retry = await uploadSession(
+          session,
+          _settings(folders: true),
+          only: first.remaining,
+          writeShot: rec.writeShot,
+          ensureFolder: rec.ensureFolder,
+          writeTimeout: const Duration(milliseconds: 100),
+        );
+
+        expect(retry.allOk, isTrue);
+        expect(retry.outcomes.single.shot, shot1);
+        expect(rec.writes, hasLength(2),
+            reason: 'pass 1 wrote shot 2; the retry wrote shot 1');
+        expect(rec.writes.last.path,
+            '/zdrive/InvoiceData/100438/100438_20260908_101112_1.jpg');
+        expect(session.shots, isEmpty);
+        expect(session.dir.existsSync(), isFalse);
+      });
+
+      test('timeout fires per shot, not per batch — each of several slow '
+          'shots gets its own budget', () async {
+        final session = await _session('100438', ['a.jpg', 'b.jpg', 'c.jpg']);
+        final rec = _Recorder();
+
+        // Every write takes 30ms. With a 40ms PER-SHOT timeout all three
+        // fit (3 x 30ms = 90ms total); if the budget were shared across the
+        // batch, the third write would blow past the cumulative 40ms mark.
+        Future<void> writer(String remotePath, Uint8List bytes) async {
+          await Future<void>.delayed(const Duration(milliseconds: 30));
+          return rec.writeShot(remotePath, bytes);
+        }
+
+        final summary = await uploadSession(
+          session,
+          _settings(folders: false),
+          writeShot: writer,
+          ensureFolder: rec.ensureFolder,
+          writeTimeout: const Duration(milliseconds: 40),
+        );
+
+        expect(summary.allOk, isTrue,
+            reason: 'each shot got a fresh 40ms budget; 3 slow writes fit');
+        expect(rec.writes, hasLength(3));
+      });
+
+      test('a timeout counts against the write phase only — the injected '
+          'writer IS the write phase, so it is bounded end-to-end', () async {
+        final session = await _session('100438', ['a.jpg']);
+        final rec = _Recorder();
+
+        final gate = Completer<void>();
+        Future<void> writer(String remotePath, Uint8List bytes) => gate.future;
+
+        final summary = await uploadSession(
+          session,
+          _settings(folders: false),
+          writeShot: writer,
+          ensureFolder: rec.ensureFolder,
+          onProgress: rec.onProgress,
+          writeTimeout: const Duration(milliseconds: 50),
+        );
+
+        expect(summary.allOk, isFalse);
+        expect(summary.outcomes.single.error, 'Write timed out after 50ms');
+        expect(rec.progress, [(done: 1, total: 1)]);
       });
     });
   });
