@@ -164,20 +164,145 @@ void main() {
     },
   );
 
-  testWidgets('folder tap is the 5.2 placeholder — no navigation happens', (
+  testWidgets('drill-down: folder tap lists that folder\'s images', (
     tester,
   ) async {
-    Future<List<SmbFile>> fake(String path) async => [
-      _entry('100438', attributes: _attrDirectory),
-    ];
+    final paths = <String>[];
+    Future<List<SmbFile>> fake(String path) async {
+      paths.add(path);
+      if (path == '/zdrive/InvoiceData') {
+        return [_entry('100438', attributes: _attrDirectory)];
+      }
+      return [
+        _entry(
+          '100438/100438_20260908_140305_001.jpg',
+          attributes: _attrPlainFile,
+          size: 12345,
+        ),
+        _entry(
+          '100438/100438_20260907_090000_001.jpg',
+          attributes: _attrPlainFile,
+          size: 2048,
+        ),
+        _entry('100438/scan_2026.jpg', attributes: _attrPlainFile, size: 999),
+        _entry('100438/notes.txt', attributes: _attrPlainFile, size: 55),
+      ];
+    }
+
+    await _pump(tester, _page(fake));
+
+    // Root: the folder tile plus pull-to-refresh, no loose images.
+    expect(find.byIcon(Icons.folder), findsOneWidget);
+    expect(find.byIcon(Icons.image_outlined), findsNothing);
+    expect(find.byType(RefreshIndicator), findsOneWidget);
+
+    await tester.tap(find.byIcon(Icons.folder));
+    await tester.pump(); // route push
+    await tester.pump(); // initState refresh future resolves
+
+    // The seam received the share root AND the folder's full path (the same
+    // shape conn.file() gets in production — folderPath is passed verbatim).
+    expect(paths, ['/zdrive/InvoiceData', '/zdrive/InvoiceData/100438']);
+
+    // AppBar title = folder name.
+    expect(
+      find.descendant(of: find.byType(AppBar), matching: find.text('100438')),
+      findsOneWidget,
+    );
+
+    // Images only — notes.txt is filtered out; three tiles remain.
+    final imageTiles = find.ancestor(
+      of: find.byIcon(Icons.image_outlined),
+      matching: find.byType(ListTile),
+    );
+    expect(imageTiles, findsNWidgets(3));
+
+    // Parsed name: title = readable time, subtitle = filename, size trailing.
+    expect(find.text('2026-09-08 14:03:05'), findsOneWidget);
+    expect(find.text('100438_20260908_140305_001.jpg'), findsOneWidget);
+    expect(find.text('12 KB'), findsOneWidget);
+    expect(find.text('2026-09-07 09:00:00'), findsOneWidget);
+    expect(find.text('100438_20260907_090000_001.jpg'), findsOneWidget);
+    expect(find.text('2 KB'), findsOneWidget);
+
+    // Unparsable image name: title falls back to the raw filename (which is
+    // also the subtitle, hence two matches).
+    expect(find.text('scan_2026.jpg'), findsNWidgets(2));
+    expect(find.text('999 B'), findsOneWidget);
+
+    // Newest first (name-desc) within the folder.
+    expect(
+      tester.getCenter(find.text('2026-09-08 14:03:05')).dy,
+      lessThan(tester.getCenter(find.text('2026-09-07 09:00:00')).dy),
+    );
+
+    // Pull-to-refresh present at this level too. (The root page's own
+    // indicator stays mounted beneath the pushed route, so the un-scoped
+    // finder sees both — scope this one to the folder page.)
+    expect(
+      find.descendant(
+        of: find.byType(OrderFilesPage),
+        matching: find.byType(RefreshIndicator),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('drill-down: tapping a photo pushes ImageViewerPage', (
+    tester,
+  ) async {
+    Future<List<SmbFile>> fake(String path) async {
+      if (path == '/zdrive/InvoiceData') {
+        return [_entry('100438', attributes: _attrDirectory)];
+      }
+      return [
+        _entry(
+          '100438/100438_20260908_140305_001.jpg',
+          attributes: _attrPlainFile,
+          size: 12345,
+        ),
+      ];
+    }
 
     await _pump(tester, _page(fake));
 
     await tester.tap(find.byIcon(Icons.folder));
     await tester.pump();
+    await tester.pump();
 
-    expect(find.byType(ImageViewerPage), findsNothing);
-    expect(find.byType(HistoryPage), findsOneWidget); // still on the root
+    await tester.tap(find.byIcon(Icons.image_outlined));
+    await tester.pump(); // route push
+    await tester.pump(); // viewer builds; its download attempt resolves
+
+    expect(find.byType(ImageViewerPage), findsOneWidget);
+    // The viewer's app bar shows the tapped file's own name.
+    expect(
+      find.descendant(
+        of: find.byType(AppBar),
+        matching: find.text('100438_20260908_140305_001.jpg'),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('drill-down: folder with no images shows the empty state', (
+    tester,
+  ) async {
+    Future<List<SmbFile>> fake(String path) async {
+      if (path == '/zdrive/InvoiceData') {
+        return [_entry('100438', attributes: _attrDirectory)];
+      }
+      return [_entry('100438/notes.txt', attributes: _attrPlainFile, size: 55)];
+    }
+
+    await _pump(tester, _page(fake));
+
+    await tester.tap(find.byIcon(Icons.folder));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('No images in this folder.'), findsOneWidget);
+    expect(find.byIcon(Icons.image_outlined), findsNothing);
   });
 
   testWidgets('activation: every History presentation re-lists via the seam', (
