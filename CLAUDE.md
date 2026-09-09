@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-MMCPic (`mmcpicv4`) — a Flutter app, Android-primary, for a photo-capture workflow: scan a QR-coded order number, photograph the item with the system camera app, review the shot, and upload it to a Windows SMB share. A History tab lists and views the images already on the share.
+OrderPic (`orderpic`) — a Flutter app, Android-primary, for a photo-capture workflow: scan a QR-coded order number, photograph the item with the system camera app, review the shot(s), and upload them to a Windows SMB share — optionally into a per-order folder, optionally as a multi-shot batch (accumulate → upload all in one pass, retry only the failed shots), with configurable format/quality (JPEG presets or custom quality/edge cap, or lossless PNG). A History tab lists and views the images already on the share.
 
 ## Commands
 
@@ -18,28 +18,36 @@ The Flutter SDK lives at `/home/dylan/Files/Develop/flutter` (useful when debugg
 
 ## Architecture
 
-The entire app is `lib/main.dart` — plain `StatefulWidget`s, no state-management library.
+The app is split into plain `StatefulWidget`s with no state-management library (a `ValueNotifier<AppSettings>` flows down from the shell):
+
+- `lib/main.dart` — entry point + `OrderPicApp`; `lib/route_observer.dart` — the shared `RouteObserver<PageRoute>` pages subscribe to
+- `lib/settings/` — `app_settings.dart` (`AppSettings` umbrella: `ConnectionSettings` + `UploadPrefs`, plus `jpegPickParams` mapping the JPEG presets onto image_picker args), `settings_store.dart` (the injectable `SettingsStore` seam over `flutter_secure_storage`), `settings_page.dart` (sectioned Settings / first-run form)
+- `lib/smb/smb.dart` — the shared `connect(ConnectionSettings)` helper (refuses to dial when no username is configured)
+- `lib/capture/` — `naming.dart` (filename builder + dual-shape parser), `session.dart` (`CaptureSession` staging + the startup stale-session sweep), `image_processor.dart` (the injectable `ImageProcessor` seam; `NativeImageProcessor` does PNG conversion via flutter_image_compress), `uploader.dart` (`uploadSession` — one connection per batch, per-shot outcomes)
+- `lib/pages/` — `home_page.dart` (tab shell), `scanner_page.dart`, `camera_page.dart`, `preview_page.dart`, `history_page.dart` (includes `OrderFilesPage` folder drill-down), `image_viewer_page.dart`
 
 ### Navigation model
 
 - `HomePage` is the root shell: an `IndexedStack` holding the Scan (`ScannerPage`) and History (`HistoryPage`) tabs behind a `NavigationBar`. The History tab is built lazily (`_historyVisited`).
 - The capture flow (`CameraPage` → `PreviewPage`) is pushed on top of the tab shell as separate routes. `popUntil((route) => route.isFirst)` returns to scanning; `pushReplacement` moves between capture stages so the stack stays shallow.
 - `ScannerPage.paused` is set by the shell while the History tab is on top, stopping the camera via `didUpdateWidget`. `_onDetect` guards re-entry with `_processing` while the confirm dialog / capture flow is in flight.
+- Settings and the capture flow are pushed as page routes over the tab shell; `ScannerPage` is `RouteAware` (shared observer in `lib/route_observer.dart`) and stops its camera in `didPushNext` while any page route is on top — `paused` alone only covers tab switches, and dialogs don't count.
+- `HistoryPage` takes an `active` prop from the shell and re-lists the share every time its tab becomes the presented one (`didUpdateWidget` sees `false → true`), so uploads made since the last visit appear without pull-to-refresh.
 
 ### SMB layer
 
-- Connection settings (host, `<share>/<sub-folder>` path, domain, user, password) live in the `SmbSettings` value class at the top of `main.dart`, persisted per-device via `flutter_secure_storage` behind the injectable `SettingsStore` seam. Credentials are never compiled into the binary — first startup opens a required setup form. Edit settings via the gear icon in either tab's app bar; the share itself must already exist, sub-folders are created at upload time.
-- Every operation (upload in `PreviewPage._upload`, listing in `HistoryPage._refresh`, download in `ImageViewerPage._load`) opens a fresh connection via the shared `connect(SmbSettings)` helper (which refuses to dial when no username is configured) and closes it in a `finally`.
-- Photos are captured via `image_picker` with no resize/compression; the original bytes are written to the share and the local capture deleted best-effort after success.
+- All persisted settings live in the `AppSettings` umbrella (`lib/settings/app_settings.dart`): the SMB `ConnectionSettings` plus the `UploadPrefs` capture/upload preferences behind a single `ValueNotifier` held by the shell. Settings are edited in one sectioned page (`settings_page.dart` — "Capture & upload" section above the "SMB connection" section), persisted per-device via `flutter_secure_storage` behind the injectable `SettingsStore` seam. Credentials are never compiled into the binary — first startup opens a required setup form (`ConnectionSettings.load` wipes an unreadable store; `UploadPrefs.load` just falls back to defaults). Edit settings via the gear icon in either tab's app bar; the share itself must already exist, sub-folders are created at upload time. Note: `HomePage` re-keys `HistoryPage` on `ObjectKey(settings.connection)` only — an upload-pref save never remounts/re-lists History, a connection change always does.
+- Every operation (batch upload in `uploadSession`, listing in `HistoryPage`/`OrderFilesPage`, download in `ImageViewerPage._load`) opens a fresh connection via the shared `connect(...)` helper (which refuses to dial when no username is configured) and closes it in a `finally` — the one exception being `uploadSession`, which deliberately reuses ONE connection for the whole batch.
+- Photos are captured via `image_picker` with pick-time JPEG quality/resize applied per `UploadPrefs` (`jpegPickParams`; `Original` = untouched bytes). PNG format converts losslessly at full size via `flutter_image_compress` behind the injectable `ImageProcessor` seam (`lib/capture/image_processor.dart`). Every capture admits through a `CaptureSession` (session-owned temp dir under `mmcpic-session-*`, plus a stale-session sweep at startup); batch uploads reuse one SMB connection with per-shot outcomes — each success deletes its local file, retry uploads only the remaining shots.
 - When downloading, the `openRead` stream must be copied chunk-by-chunk into a `BytesBuilder` — smb_connect reuses one buffer for every chunk it yields. Don't "simplify" this.
 
 ### Filename contract (cross-feature invariant)
 
-Uploads are named `{OrderNumber}_{YYYYMMDD}_{HHMMSS}.jpg`, timestamped when the upload starts (`PreviewPage._buildFileName`). `HistoryPage` depends on this exact format in two places: descending-name sort = newest first, and `_parseName` splits it back into (order number, readable date/time). Change both sides together or History breaks.
+Uploads are named `{OrderNumber}_{YYYYMMDD}_{HHMMSS}_{NNN}.jpg|.png` (`lib/capture/naming.dart` `buildUploadFileName`), stamped at CAPTURE time (when the shot is admitted into the `CaptureSession` — not at upload). `NNN` is the zero-padded 3-digit shot index within the session (001-based; `padLeft(3, '0')` so it grows past 99 naturally), and the extension follows the configured format. `HistoryPage` depends on this format in two places: descending-name sort = newest first, and `parseUploadName` splits the name back into (order number, readable date/time). The parser accepts BOTH the legacy 3-part shape (`ORDER_YYYYMMDD_HHMMSS.ext`) and the current 4-part shape — anything else returns null and the UI falls back to the raw filename. Change both sides together or History breaks.
 
 ## Tests
 
-The settings feature ships unit + widget tests (`test/smb_settings_test.dart`, `test/settings_page_test.dart`, `test/home_page_test.dart`) using the injectable `SettingsStore` seam (`test/helpers/in_memory_settings_store.dart`) — no platform channels needed. `test/widget_test.dart` remains a placeholder: the camera + SMB capture flow itself requires a physical device and a LAN share.
+Unit tests cover the value/logic layers — settings (`test/smb_settings_test.dart`, `test/app_settings_test.dart`, `test/upload_prefs_test.dart`), naming (`test/naming_test.dart`), sessions (`test/capture_session_test.dart`), and uploads (`test/uploader_test.dart`), plus the `ImageProcessor` seam (`test/image_processor_test.dart`) — using the injectable seams (`test/helpers/in_memory_settings_store.dart`, `CopyOnlyProcessor`, injected `ShotWriter`/`listDir` fakes), so no platform channels are needed. Widget tests cover `settings_page_test.dart`, `home_page_test.dart`, `preview_page_test.dart` (including the CameraPage admission flow via a fake processor/picker), and `history_page_test.dart` (fake `SmbFile` entries). `test/widget_test.dart` remains a placeholder: the real camera + SMB capture flow itself requires a physical device and a LAN share.
 
 <!-- BEGIN OPENSPEC SUPERPOWERS BRIDGE -->
 <!-- Source: superpowers-bridge/templates/adopters/CLAUDE.md.fragment.md -->
