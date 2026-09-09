@@ -12,11 +12,23 @@ import 'preview_page.dart';
 /// user gets the full native camera experience (zoom, flash, timer,
 /// portrait and landscape, etc.).
 ///
-/// Owns one step of the capture loop: pick → process → admit into the
-/// session → hand the session to PreviewPage. [processor] is the test seam
-/// (default the real [NativeImageProcessor]); every entry to this page
-/// passes a [CaptureSession], so the numbering continues across
-/// retakes/adds within one order's batch.
+/// TRANSIENT page: the system camera opens the moment the page appears and
+/// the page itself only ever shows a minimal 'Opening camera…' state while
+/// the picker is in flight — there is no idle screen to land on, nothing to
+/// tap, no way to get stuck here. Every outcome leaves the page:
+///
+///  - pick succeeds → process → admit into the session → [PreviewPage];
+///  - pick returns null (user backed out of the system camera) → cancel:
+///    back to a fresh [PreviewPage] when shots are already staged (Retake /
+///    Add photo must never discard the batch), otherwise pop the capture
+///    flow to the first route (the Scan tab);
+///  - pick or processing throws → SnackBar + that same two-way exit, so no
+///    dead screen is ever parked under the user. Retrying means starting
+///    the flow again (scan, or Add photo from the preview).
+///
+/// [processor] is the test seam (default the real [NativeImageProcessor]);
+/// every entry to this page passes a [CaptureSession], so the numbering
+/// continues across retakes/adds within one order's batch.
 class CameraPage extends StatefulWidget {
   const CameraPage({
     super.key,
@@ -43,7 +55,8 @@ class _CameraPageState extends State<CameraPage> {
   @override
   void initState() {
     super.initState();
-    // Open the system camera straight away after a successful scan.
+    // Transient page — open the system camera straight away; that is the
+    // only reason this page exists.
     unawaited(_takePhoto());
   }
 
@@ -66,15 +79,16 @@ class _CameraPageState extends State<CameraPage> {
       );
       if (!mounted) return;
       if (photo == null) {
-        // User backed out — allow retry.
-        setState(() => _launching = false);
+        // Backed out of the system camera = cancelling — or, with shots
+        // already staged, just returning to review. No retry-in-place: the
+        // flow restarts from the scanner, or from the preview's Add photo.
+        await _exit();
         return;
       }
 
       // Admission: process FIRST, add only on success. A throw here (codec
       // failure, unreadable pick) must leave the session exactly as it was
-      // — no half-admitted shot, numbering unchanged — so the user can
-      // simply try again.
+      // — no half-admitted shot, numbering unchanged.
       try {
         final shot = await widget.processor.process(
           pickedPath: photo.path,
@@ -84,69 +98,86 @@ class _CameraPageState extends State<CameraPage> {
         widget.session.add(shot);
       } catch (_) {
         if (!mounted) return;
-        setState(() => _launching = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not process photo')),
-        );
+        await _abandon('Could not process photo');
         return;
       }
 
       if (!mounted) return;
       await Navigator.of(context).pushReplacement(
-        MaterialPageRoute(
-          builder: (_) => PreviewPage(
-            session: widget.session,
-            settingsNotifier: widget.settingsNotifier,
-          ),
-        ),
+        MaterialPageRoute(builder: (_) => _reviewPage()),
       );
     } catch (e) {
+      // The picker itself failed (camera app crashed, permission pulled
+      // mid-flight) — same contract as a processing failure: tell, leave.
       if (!mounted) return;
-      setState(() => _launching = false);
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Camera failed: $e')));
+      await _abandon('Camera failed: $e');
     }
   }
 
-  /// Back to the scanner. When nothing is staged the session dir would
-  /// otherwise leak until the next launch's sweep — reclaim it now.
-  Future<void> _backToScanner() async {
+  /// The review page for this page's session — the exit target whenever
+  /// shots are already staged, and the admission target on success. The
+  /// [PreviewPage] that launched the camera did so with `pushReplacement`,
+  /// so "back to review" means replacing THIS page with a fresh one; the
+  /// fresh state starts with the newest shot selected.
+  PreviewPage _reviewPage() => PreviewPage(
+    session: widget.session,
+    settingsNotifier: widget.settingsNotifier,
+  );
+
+  /// Leave the page the way the user came in: review of the same session
+  /// when shots are staged, the first route (Scan tab) when the session is
+  /// still empty. With nothing staged the session dir would otherwise leak
+  /// until the next launch's sweep — reclaim it now.
+  Future<void> _exit() async {
+    if (widget.session.shots.isNotEmpty) {
+      await Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (_) => _reviewPage()),
+      );
+      return;
+    }
     await widget.session.cleanupIfEmpty();
     if (!mounted) return;
     Navigator.of(context).popUntil((route) => route.isFirst);
   }
 
+  /// [message] + [_exit] for a failed pick or processing. The SnackBar goes
+  /// through the app-level ScaffoldMessenger BEFORE leaving — it outlives
+  /// this page and surfaces on whatever the user lands on.
+  Future<void> _abandon(String message) async {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+    await _exit();
+  }
+
   @override
   Widget build(BuildContext context) {
+    // Launching state only: the order being captured plus the fact that the
+    // system camera is opening. No idle screen, no manual button, no
+    // settings wheel — the page's whole life is the picker being in flight
+    // (or the exit that follows it).
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
         child: Column(
           children: [
-            Row(
-              children: [
-                IconButton(
-                  icon: const Icon(Icons.qr_code_scanner),
-                  color: Colors.white,
-                  tooltip: 'Scan a different QR code',
-                  onPressed: _backToScanner,
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
                 ),
-                _qrChip(),
-              ],
+                child: _qrChip(),
+              ),
             ),
             const Spacer(),
-            const Icon(Icons.photo_camera, color: Colors.white, size: 64),
+            const CircularProgressIndicator(color: Colors.white),
             const SizedBox(height: 16),
             const Text(
-              'Take a photo of the scanned item',
+              'Opening camera…',
               style: TextStyle(color: Colors.white, fontSize: 18),
               textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 32),
-            FilledButton.icon(
-              icon: const Icon(Icons.camera_alt),
-              label: const Text('Open camera'),
-              onPressed: _launching ? null : _takePhoto,
             ),
             const Spacer(),
           ],

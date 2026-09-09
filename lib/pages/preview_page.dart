@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+import '../capture/image_processor.dart';
 import '../capture/session.dart';
 import '../capture/uploader.dart';
 import '../settings/app_settings.dart';
@@ -22,6 +23,7 @@ class PreviewPage extends StatefulWidget {
     required this.session,
     required this.settingsNotifier,
     this.uploader,
+    this.processor = const NativeImageProcessor(),
   });
 
   final CaptureSession session;
@@ -37,6 +39,12 @@ class PreviewPage extends StatefulWidget {
     AppSettings, {
     void Function(int done, int total)? onProgress,
   })? uploader;
+
+  /// Injectable admission for the camera pages this page opens (Retake /
+  /// Add photo / More for this order) — forwarded so a test's fake or
+  /// thrower reaches the whole capture loop, not just the review side.
+  /// Defaults to production.
+  final ImageProcessor processor;
 
   @override
   State<PreviewPage> createState() => _PreviewPageState();
@@ -154,6 +162,7 @@ class _PreviewPageState extends State<PreviewPage> {
         builder: (_) => CameraPage(
           session: widget.session,
           settingsNotifier: widget.settingsNotifier,
+          processor: widget.processor,
         ),
       ),
     );
@@ -171,6 +180,7 @@ class _PreviewPageState extends State<PreviewPage> {
         builder: (_) => CameraPage(
           session: session,
           settingsNotifier: widget.settingsNotifier,
+          processor: widget.processor,
         ),
       ),
     );

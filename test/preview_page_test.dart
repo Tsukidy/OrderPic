@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:image_picker_platform_interface/image_picker_platform_interface.dart';
@@ -137,6 +138,7 @@ Future<void> _pumpPreview(
   required CaptureSession session,
   required bool batch,
   _Uploader? uploader,
+  ImageProcessor processor = const _CopyProcessor(),
 }) async {
   await tester.pumpWidget(
     MaterialApp(
@@ -144,6 +146,7 @@ Future<void> _pumpPreview(
         session: session,
         settingsNotifier: ValueNotifier(_settings(batch: batch)),
         uploader: uploader,
+        processor: processor,
       ),
     ),
   );
@@ -207,10 +210,20 @@ class _ThrowingProcessor implements ImageProcessor {
 /// method channel, no file_selector (camera source needs no delegate: this
 /// fake answers getImageFromSource directly). A null entry (or an exhausted
 /// script) means "user backed out" → null, exactly like the real picker.
+///
+/// A script entry of [heldPick] never completes on its own: the camera is
+/// "in flight" until the test releases the matching [_HeldPick] (in [held],
+/// call order), which is how the real system camera behaves — the pick
+/// future only settles when the user comes back.
 class _FakePickerPlatform extends ImagePickerPlatform {
+  /// Sentinel script entry: hold the pick open until released.
+  static const String heldPick = '__held__';
+
   _FakePickerPlatform(this.pickedPaths);
 
   final List<String?> pickedPaths;
+  final List<_HeldPick> held = [];
+
   int _calls = 0;
 
   @override
@@ -225,8 +238,38 @@ class _FakePickerPlatform extends ImagePickerPlatform {
     } else {
       path = null;
     }
+    if (identical(path, heldPick)) {
+      final h = _HeldPick();
+      held.add(h);
+      return h.completer.future;
+    }
     return path == null ? null : XFile(path);
   }
+}
+
+/// The release handle for a [heldPick] script entry: the "system camera is
+/// open" state, resolved by the test.
+class _HeldPick {
+  final completer = Completer<XFile?>();
+
+  /// The camera app came back with a photo at [path].
+  void resolve(String path) => completer.complete(XFile(path));
+
+  /// The user backed out of the camera app.
+  void cancel() => completer.complete(null);
+}
+
+/// Every pick throws the way a dead camera app / a pulled permission does —
+/// exercises the pick-time `catch` in [_CameraPageState._takePhoto].
+class _CrashingPickerPlatform extends ImagePickerPlatform {
+  @override
+  Future<XFile?> getImageFromSource({
+    required ImageSource source,
+    ImagePickerOptions options = const ImagePickerOptions(),
+  }) async => throw PlatformException(
+    code: 'camera_error',
+    message: 'camera_in_use',
+  );
 }
 
 /// The admission wrapper CameraPage wires: process, then — and only then —
@@ -252,8 +295,8 @@ Future<void> _admit(
 void main() {
   setUp(() {
     // Default per-test platform: installed but scriptless → every pick
-    // behaves as "user backed out", so a pushed CameraPage sits on its
-    // retry UI instead of touching the method channel.
+    // behaves as "user backed out" (null), so a pushed CameraPage runs its
+    // cancel exit instead of touching the method channel.
     ImagePickerPlatform.instance = _FakePickerPlatform([]);
   });
 
@@ -448,7 +491,8 @@ void main() {
 
       expect(find.text('Order: 100438'), findsOneWidget,
           reason: 'same order, brand-new session');
-      expect(find.text('Open camera'), findsOneWidget);
+      expect(find.text('Opening camera…'), findsOneWidget,
+          reason: 'CameraPage is transient — straight into the launch');
     });
 
     testWidgets('failed pass leaves failed shots staged on disk for retry',
@@ -492,6 +536,57 @@ void main() {
       expect(File(shots[1].localPath).existsSync(), isTrue);
       expect(find.text('Order: 100438'), findsOneWidget,
           reason: 'same session continues — numbering keeps accumulating');
+      expect(find.text('Opening camera…'), findsOneWidget,
+          reason: 'CameraPage is transient — straight into the launch');
+    });
+
+    testWidgets('Retake → transient camera admits the new shot → fresh '
+        'preview shows the NEW last shot (selection not stuck on the '
+        'pinned thumbnail)', (tester) async {
+      final session = await _real(tester, () => _sessionOf('100438', 3));
+      final shots = session.shots.toList();
+      final picked = await _real(tester, () => _pickedFile('IMG_0004.jpg'));
+      // The retake pick is HELD until the camera page is up — the test
+      // resolves it, as the system camera would.
+      final picker = _FakePickerPlatform([_FakePickerPlatform.heldPick]);
+      ImagePickerPlatform.instance = picker;
+
+      await _pumpPreview(tester, session: session, batch: true);
+
+      // Review the FIRST shot (pins the selection), then retake — Retake
+      // drops the NEWEST shot, and the pinned index must not survive into
+      // the fresh preview.
+      final stripTiles = find.descendant(
+        of: find.byKey(const Key('thumb_strip')),
+        matching: find.byType(GestureDetector),
+      );
+      await tester.tap(stripTiles.first);
+      await tester.pump();
+      expect(_fullScreenFile(tester).path, shots.first.localPath);
+
+      await tester.tap(find.text('Retake'));
+      expect(session.shots, [shots[0], shots[1]],
+          reason: 'removeLast drops the newest synchronously');
+
+      await _ioSettle(
+        tester,
+        () => find.byType(CameraPage).evaluate().isNotEmpty,
+      );
+      expect(picker.held, hasLength(1));
+      picker.held.single.resolve(picked.path);
+
+      await _ioSettle(
+        tester,
+        () => find.byType(PreviewPage).evaluate().isNotEmpty &&
+            session.shots.length == 3,
+      );
+      await tester.pumpAndSettle();
+
+      expect(session.shots.last.fileName, matches(RegExp(r'_003\.png$')),
+          reason: 'numbering re-uses the retaken slot');
+      expect(_fullScreenFile(tester).path, session.shots.last.localPath,
+          reason: 'the fresh preview presents the NEW last shot — the '
+              'pinned selection was review-time state only');
     });
   });
 
@@ -551,7 +646,7 @@ void main() {
 
   group('CameraPage admission', () {
     testWidgets('processing failure: snackbar shown, session untouched, '
-        'stays on camera', (tester) async {
+        'pops back to the shell (session empty)', (tester) async {
       final session = await _real(
         tester,
         () => CaptureSession.create('100438'),
@@ -575,17 +670,16 @@ void main() {
         () => find.byType(SnackBar).evaluate().isNotEmpty,
       );
 
-      expect(find.text('Could not process photo'), findsOneWidget);
-      expect(find.byType(PreviewPage), findsNothing);
-      expect(find.text('Open camera'), findsOneWidget,
-          reason: 'still on camera — the shot can simply be re-taken');
-      expect(session.shots, isEmpty);
-      expect(session.nextIndex, 1);
-      expect(
-        session.dir.listSync().whereType<File>(),
-        isEmpty,
-        reason: 'no half-admitted file',
-      );
+      // The failure exit: the session is empty, so the failure abandons the
+      // flow — and reclaims the dir (the old screen sat on a retry UI; the
+      // new model has nothing to sit on).
+      expect(find.text('Could not process photo'), findsOneWidget,
+          reason: 'the messenger-held snackbar outlives the exit');
+      expect(session.shots, isEmpty, reason: 'no half-admitted shot');
+      expect(session.nextIndex, 1, reason: 'numbering untouched');
+      await _ioSettle(tester, () => !session.dir.existsSync());
+      expect(session.dir.existsSync(), isFalse,
+          reason: 'empty session dir reclaimed on the failure exit');
     });
 
     testWidgets('successful pick: admits via the processor and pushes '
@@ -620,6 +714,177 @@ void main() {
         reason: 'numbering comes from session.nextIndex',
       );
       expect(File(session.shots.single.localPath).existsSync(), isTrue);
+    });
+  });
+
+  group('CameraPage transient behavior', () {
+    /// Shell stand-in: a stub first route (the tab shell's role) with
+    /// [CameraPage] pushed ON TOP — the exact stack ScannerPage._startCapture
+    /// builds. Lets the tests assert what cancel leaves VISIBLE (the stub,
+    /// not CameraPage) without mounting the scanner's camera controller.
+    Widget shellWithCamera(
+      CaptureSession session, {
+      ImageProcessor processor = const _CopyProcessor(),
+    }) {
+      return MaterialApp(
+        home: Builder(
+          builder: (context) {
+            // Push the camera once the first frame exists — _startCapture's
+            // `await Navigator.push(...)` shape.
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => CameraPage(
+                    session: session,
+                    settingsNotifier: ValueNotifier(_settings(batch: true)),
+                    processor: processor,
+                  ),
+                ),
+              );
+            });
+            return const Scaffold(body: Text('SHELL'));
+          },
+        ),
+      );
+    }
+
+    testWidgets('no idle screen: launching state only, then the pick runs',
+        (tester) async {
+      final session = await _real(
+        tester,
+        () => CaptureSession.create('100438'),
+      );
+      _created.add(session.dir);
+      final picker = _FakePickerPlatform([_FakePickerPlatform.heldPick]);
+      ImagePickerPlatform.instance = picker;
+
+      await tester.pumpWidget(shellWithCamera(session));
+      await tester.pump(); // post-frame push
+      await tester.pump(); // camera route builds
+
+      expect(find.byType(CameraPage), findsOneWidget);
+      expect(find.text('Opening camera…'), findsOneWidget,
+          reason: 'minimal launching state while the picker is in flight');
+      expect(find.text('Order: 100438'), findsOneWidget);
+      expect(find.text('Open camera'), findsNothing,
+          reason: 'the manual button is gone — no idle screen');
+      expect(find.byIcon(Icons.photo_camera), findsNothing);
+      expect(find.byTooltip('Scan a different QR code'), findsNothing,
+          reason: 'no manual scan-shortcut affordance');
+      expect(find.byTooltip('Settings'), findsNothing,
+          reason: 'no settings wheel');
+      // The camera is still in flight here — nothing has settled, no exit.
+      expect(picker.held, hasLength(1));
+    });
+
+    testWidgets('null pick with EMPTY session pops to the shell '
+        '(cancel-to-scanner)', (tester) async {
+      final session = await _real(
+        tester,
+        () => CaptureSession.create('100438'),
+      );
+      _created.add(session.dir);
+      ImagePickerPlatform.instance = _FakePickerPlatform([null]);
+
+      await tester.pumpWidget(shellWithCamera(session));
+      await tester.pump(); // post-frame push
+      await _ioSettle(
+        tester,
+        () => find.byType(CameraPage).evaluate().isEmpty &&
+            find.text('SHELL').evaluate().isNotEmpty,
+      );
+
+      expect(find.byType(CameraPage), findsNothing);
+      expect(find.byType(PreviewPage), findsNothing);
+      expect(find.text('SHELL'), findsOneWidget,
+          reason: 'popped all the way back — the scanner would be on top');
+      // Nothing was staged, so the session dir is reclaimed right away.
+      await _ioSettle(tester, () => !session.dir.existsSync());
+      expect(session.dir.existsSync(), isFalse,
+          reason: 'empty session dir reclaimed on cancel (no leak)');
+    });
+
+    testWidgets('null pick with STAGED SHOTS returns to PreviewPage with '
+        'the batch intact', (tester) async {
+      final session = await _real(tester, () => _sessionOf('100438', 2));
+      final shots = session.shots.toList();
+      ImagePickerPlatform.instance = _FakePickerPlatform([null]);
+
+      await tester.pumpWidget(shellWithCamera(session));
+      await tester.pump(); // post-frame push
+      await _ioSettle(
+        tester,
+        () => find.byType(PreviewPage).evaluate().isNotEmpty,
+      );
+      // pushReplacement keeps the outgoing CameraPage mounted while its
+      // exit transition runs — settle the transition before asserting.
+      await tester.pumpAndSettle();
+
+      expect(find.byType(CameraPage), findsNothing);
+      expect(find.byType(PreviewPage), findsOneWidget);
+      expect(find.text('Order: 100438 — 2 photos'), findsOneWidget,
+          reason: 'the batch survived the cancel — nothing was discarded');
+      expect(File(shots[0].localPath).existsSync(), isTrue);
+      expect(File(shots[1].localPath).existsSync(), isTrue);
+      expect(session.shots, hasLength(2));
+    });
+
+    testWidgets('processing failure with STAGED SHOTS pops back to '
+        'PreviewPage with the snackbar', (tester) async {
+      final session = await _real(tester, () => _sessionOf('100438', 1));
+      final shots = session.shots.toList();
+      final picked = await _real(tester, () => _pickedFile('IMG_0002.jpg'));
+      ImagePickerPlatform.instance = _FakePickerPlatform([picked.path]);
+
+      await tester.pumpWidget(
+        shellWithCamera(session, processor: const _ThrowingProcessor()),
+      );
+      await tester.pump(); // post-frame push
+      await _ioSettle(
+        tester,
+        () => find.byType(PreviewPage).evaluate().isNotEmpty,
+      );
+      // Settle the pushReplacement transition before asserting: during it,
+      // both scaffolds are root-registered and the snack shows on both.
+      await tester.pumpAndSettle();
+
+      expect(find.byType(CameraPage), findsNothing);
+      expect(find.byType(PreviewPage), findsOneWidget);
+      expect(find.text('Could not process photo'), findsOneWidget,
+          reason: 'the messenger-held snackbar survives the exit');
+      expect(find.text('Order: 100438 — 1 photo'), findsOneWidget);
+      expect(File(shots.single.localPath).existsSync(), isTrue,
+          reason: 'the staged shot was never touched');
+      expect(session.shots, hasLength(1));
+    });
+
+    testWidgets('picker crash (pickImage throws) abandons to the shell '
+        'with the error snackbar (session empty)', (tester) async {
+      final session = await _real(
+        tester,
+        () => CaptureSession.create('100438'),
+      );
+      _created.add(session.dir);
+      ImagePickerPlatform.instance = _CrashingPickerPlatform();
+
+      await tester.pumpWidget(shellWithCamera(session));
+      await tester.pump(); // post-frame push
+      await _ioSettle(
+        tester,
+        () =>
+            find.byType(SnackBar).evaluate().isNotEmpty &&
+            find.text('SHELL').evaluate().isNotEmpty &&
+            find.byType(CameraPage).evaluate().isEmpty,
+      );
+      await tester.pump(const Duration(milliseconds: 400)); // transition
+
+      expect(find.textContaining('Camera failed:'), findsOneWidget);
+      expect(find.byType(CameraPage), findsNothing);
+      expect(find.text('SHELL'), findsOneWidget,
+          reason: 'the crash abandons the flow — no dead screen to sit on');
+      await _ioSettle(tester, () => !session.dir.existsSync());
+      expect(session.dir.existsSync(), isFalse,
+          reason: 'no staged shots → dir reclaimed');
     });
   });
 
