@@ -13,6 +13,14 @@ import 'camera_page.dart';
 /// Batch mode shows the strip: tapping a thumbnail reviews that shot
 /// full-screen (default = the newest).
 ///
+/// Admission is background (Task 6.6): a picked shot lands here as a
+/// PENDING entry while its conversion still runs, so this page re-renders
+/// off the session's notifications ([CaptureSession] is a ChangeNotifier).
+/// Pending thumbs show a spinner; failed conversions stay staged flagged
+/// (error tint + full-screen retake); Upload all waits for pending shots
+/// to settle and then uploads the READY ones only — failed entries are
+/// never uploaded, they are surfaced for retake.
+///
 /// The upload itself lives in [uploadSession] (Task 4.1); this page only
 /// owns the state machine around it. [PreviewPage.uploader] is the test
 /// seam — null means the real thing, exactly like the `SettingsStore` /
@@ -31,12 +39,13 @@ class PreviewPage extends StatefulWidget {
 
   /// Injectable upload — null → the real [uploadSession]. Tests pass a
   /// fake that records calls and returns a canned [UploadSummary]. The
-  /// extra named [onProgress] parameter keeps the injected shape
-  /// assignable from the real `uploadSession` while letting fakes ignore
-  /// progress.
+  /// extra named parameters keep the injected shape assignable from the
+  /// real `uploadSession` (`only` = the READY-only subset this page
+  /// uploads) while letting fakes ignore them.
   final Future<UploadSummary> Function(
     CaptureSession,
     AppSettings, {
+    List<Shot>? only,
     void Function(int done, int total)? onProgress,
   })? uploader;
 
@@ -50,7 +59,7 @@ class PreviewPage extends StatefulWidget {
   State<PreviewPage> createState() => _PreviewPageState();
 }
 
-enum _UploadStatus { idle, uploading, done, failed }
+enum _UploadStatus { idle, waiting, uploading, done, failed }
 
 class _PreviewPageState extends State<PreviewPage> {
   _UploadStatus _status = _UploadStatus.idle;
@@ -76,33 +85,102 @@ class _PreviewPageState extends State<PreviewPage> {
   /// Thrown-uploader escape text (per-shot errors live in [_summary]).
   String? _error;
 
-  /// Last path the full-screen image pointed at. A successful upload
+  /// Last READY path the full-screen image pointed at. A successful upload
   /// empties the session (the uploader deletes each local file and reclaims
   /// the dir), but today's page keeps showing the just-uploaded photo
   /// behind the done banner — the image cache still holds it. Pin the path
-  /// so that survives the session emptying.
+  /// so that survives the session emptying. Pending/failed selections
+  /// never overwrite it (they have no displayable file).
   String? _lastShownPath;
 
   /// The folder-bundling UI switch: count chip, thumb strip, Add photo,
   /// Upload all. Batch OFF must stay exactly today's single-shot UX.
   bool get _batchOn => widget.settingsNotifier.value.upload.batchMode;
 
+  /// The staged shots that may be uploaded — the ones whose conversion
+  /// finished. PENDING shots gate the upload (it starts only after they
+  /// settle); FAILED ones are surfaced for retake instead.
+  List<Shot> get _readyShots => [
+    for (final s in widget.session.shots)
+      if (s.status == ShotStatus.ready) s,
+  ];
+
+  List<Shot> get _failedShots => [
+    for (final s in widget.session.shots)
+      if (s.status == ShotStatus.failed) s,
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    // Background conversions settle via session notifications — re-render
+    // (and start a gated upload) as statuses change.
+    widget.session.addListener(_onSessionChanged);
+  }
+
+  @override
+  void dispose() {
+    widget.session.removeListener(_onSessionChanged);
+    super.dispose();
+  }
+
+  /// Fired for every staged-list change: admissions, pending →
+  /// ready/failed settlements, retake removals, upload deletions.
+  void _onSessionChanged() {
+    if (!mounted) return;
+    if (_status == _UploadStatus.waiting &&
+        widget.session.pendingShots.isEmpty) {
+      // The gate opened: pending conversions settled (ready or failed) —
+      // upload starts NOW, covering the ready shots only. Drop the waiting
+      // status first so [_uploadAll]'s re-entry guard lets it run.
+      _status = _UploadStatus.idle;
+      _uploadAll();
+      return;
+    }
+    setState(() {});
+  }
+
   Future<void> _uploadAll() async {
-    if (_status == _UploadStatus.uploading) return;
+    if (_status == _UploadStatus.uploading || _status == _UploadStatus.waiting) {
+      return;
+    }
+    final ready = _readyShots;
+    if (widget.session.pendingShots.isNotEmpty) {
+      // Gate: upload STARTS only after pending conversions settle. The
+      // session listener calls back in when they have.
+      setState(() => _status = _UploadStatus.waiting);
+      return;
+    }
+    if (ready.isEmpty) {
+      // Nothing uploadable: every staged shot failed to convert (or the
+      // session is empty). Surface the flags instead of "uploading" a
+      // zero-shot batch.
+      if (_failedShots.isEmpty) return;
+      setState(() {
+        _status = _UploadStatus.failed;
+        _summary = null;
+        _error = null;
+        _uploadedName = null;
+      });
+      return;
+    }
+
     setState(() {
       _status = _UploadStatus.uploading;
       _uploadedName = null;
       _done = 0;
-      _total = widget.session.shots.length;
+      _total = ready.length;
       _summary = null;
       _error = null;
       _selectedIndex = null; // working set is about to be re-cut — newest again
     });
 
     try {
-      // Retry is this same call: failed shots stay staged, so re-invoking
-      // the uploader on the session covers exactly the remaining shots.
-      final summary = await _runUpload();
+      // Retry is this same call: failed-upload shots stay staged, so
+      // re-invoking the uploader on the ready subset covers exactly the
+      // remaining shots. Conversion-FAILED entries are never passed — they
+      // stay staged flagged for retake.
+      final summary = await _runUpload(ready);
       if (!mounted) return;
       setState(() {
         _summary = summary;
@@ -122,12 +200,13 @@ class _PreviewPageState extends State<PreviewPage> {
     }
   }
 
-  Future<UploadSummary> _runUpload() {
+  Future<UploadSummary> _runUpload(List<Shot> ready) {
     final injected = widget.uploader;
     if (injected != null) {
       return injected(
         widget.session,
         widget.settingsNotifier.value,
+        only: ready,
         onProgress: (done, total) {
           if (mounted) setState(() => _done = done);
         },
@@ -136,6 +215,7 @@ class _PreviewPageState extends State<PreviewPage> {
     return uploadSession(
       widget.session,
       widget.settingsNotifier.value,
+      only: ready,
       onProgress: (done, total) {
         if (mounted) setState(() => _done = done);
       },
@@ -147,7 +227,16 @@ class _PreviewPageState extends State<PreviewPage> {
   /// happened, [CaptureSession.nextIndex] rolls back with it); Add photo
   /// keeps every staged shot. Either way the session survives, so shot
   /// numbering and the batch keep accumulating.
+  ///
+  /// Retaking a PENDING last shot is the cancel path: the entry goes now
+  /// and the in-flight conversion cleans up after itself when it finds its
+  /// entry gone ([admitPicked]'s settle step). A FAILED last shot likewise
+  /// drops its (nonexistent) file without ceremony.
   Future<void> _openCamera({required bool removeLast}) async {
+    // Retake/Add during the upload gate: leaving review while conversions
+    // still run means there is no one waiting — clear the gate so the
+    // settle never fires an upload into a page that has moved on.
+    if (_status == _UploadStatus.waiting) _status = _UploadStatus.idle;
     if (removeLast) {
       final shot = widget.session.removeLast();
       if (shot != null) await widget.session.deleteLocal(shot);
@@ -157,7 +246,30 @@ class _PreviewPageState extends State<PreviewPage> {
     // should present the newly admitted (last) shot either way.
     _selectedIndex = null;
     if (!mounted) return;
-    await Navigator.of(context).pushReplacement(
+    await _pushCamera();
+  }
+
+  /// Retake of ONE flagged (failed-conversion) entry — not necessarily the
+  /// newest: drops exactly that entry and relaunches the camera on the
+  /// same session so the replacement reuses its slot number.
+  Future<void> _retakeShot(Shot failed) async {
+    await widget.session.deleteLocal(failed);
+    _selectedIndex = null;
+    if (!mounted) return;
+    await _pushCamera();
+  }
+
+  /// The oldest conversion failure — the "Retake failed photo" shortcut
+  /// target when no specific shot is pinned.
+  Shot? get _firstFailed {
+    for (final s in widget.session.shots) {
+      if (s.status == ShotStatus.failed) return s;
+    }
+    return null;
+  }
+
+  Future<void> _pushCamera() {
+    return Navigator.of(context).pushReplacement(
       MaterialPageRoute(
         builder: (_) => CameraPage(
           session: widget.session,
@@ -171,7 +283,8 @@ class _PreviewPageState extends State<PreviewPage> {
   /// Post-upload continuation for the same order — a FRESH session (new
   /// dir, numbering restarted), never a reuse of the one that just
   /// finished. Both 'More for this order' (batch on) and 'Another photo
-  /// (same order)' (batch off) land here.
+  /// (same order)' (batch off) land here. Only reachable with no
+  /// conversion failures staged (the done row swaps to retake-first then).
   Future<void> _moreForThisOrder() async {
     final session = await CaptureSession.create(widget.session.orderNumber);
     if (!mounted) return;
@@ -191,8 +304,8 @@ class _PreviewPageState extends State<PreviewPage> {
     Navigator.of(context).popUntil((route) => route.isFirst);
   }
 
-  /// One line per failed outcome, in session order — a dead local file
-  /// would otherwise be invisible behind a single blob message.
+  /// One line per failed UPLOAD outcome, in session order — a dead local
+  /// file would otherwise be invisible behind a single blob message.
   List<String> get _failedLines => [
     for (final o in _summary?.outcomes ?? const <UploadOutcome>[])
       if (!o.ok) '${o.shot.fileName}: ${o.error ?? 'failed'}',
@@ -201,10 +314,16 @@ class _PreviewPageState extends State<PreviewPage> {
   @override
   Widget build(BuildContext context) {
     final shots = widget.session.shots;
-    if (shots.isNotEmpty) {
+    final done = _status == _UploadStatus.done;
+
+    // The reviewed shot — pinned index, else the newest. In the done state
+    // the working set is over: keep showing the pinned last-uploaded image
+    // (a leftover FAILED entry must not replace it with the placeholder).
+    Shot? selected;
+    if (!done && shots.isNotEmpty) {
       final sel = _selectedIndex;
-      final selected = (sel != null && sel < shots.length) ? shots[sel] : shots.last;
-      _lastShownPath = selected.localPath;
+      selected = (sel != null && sel < shots.length) ? shots[sel] : shots.last;
+      if (selected.status == ShotStatus.ready) _lastShownPath = selected.localPath;
     }
     final shownPath = _lastShownPath;
 
@@ -213,13 +332,7 @@ class _PreviewPageState extends State<PreviewPage> {
       body: Stack(
         children: [
           Positioned.fill(
-            child: shownPath == null
-                ? const SizedBox.shrink()
-                : Image.file(
-                    File(shownPath),
-                    fit: BoxFit.contain,
-                    gaplessPlayback: true,
-                  ),
+            child: _fullScreen(selected, shownPath),
           ),
           SafeArea(
             child: Column(
@@ -230,11 +343,12 @@ class _PreviewPageState extends State<PreviewPage> {
                       icon: const Icon(Icons.qr_code_scanner),
                       color: Colors.white,
                       tooltip: 'Scan a different QR code',
-                      onPressed: _status == _UploadStatus.uploading
+                      onPressed: _status == _UploadStatus.uploading ||
+                              _status == _UploadStatus.waiting
                           ? null
                           : _scanNext,
                     ),
-                    if (_status == _UploadStatus.done)
+                    if (done)
                       _doneBanner()
                     else if (_batchOn)
                       _batchChip(shots.length)
@@ -242,9 +356,10 @@ class _PreviewPageState extends State<PreviewPage> {
                       _qrChip(),
                   ],
                 ),
-                if (_batchOn && _status != _UploadStatus.done)
-                  _thumbStrip(shots),
+                if (_batchOn && !done) _thumbStrip(shots),
                 const Spacer(),
+                if (_failedShots.isNotEmpty && _status != _UploadStatus.uploading)
+                  _conversionBanner(),
                 if (_status == _UploadStatus.failed) _errorBanner(),
                 _bottomButtons(),
                 const SizedBox(height: 24),
@@ -252,6 +367,63 @@ class _PreviewPageState extends State<PreviewPage> {
             ),
           ),
           if (_status == _UploadStatus.uploading) _uploadingOverlay(),
+        ],
+      ),
+    );
+  }
+
+  /// The full-screen area: the reviewed READY shot, a spinner while its
+  /// conversion runs, a retake placeholder when the conversion failed —
+  /// or, once uploaded, the pinned last-uploaded image.
+  Widget _fullScreen(Shot? selected, String? shownPath) {
+    if (selected == null || selected.status == ShotStatus.ready) {
+      return shownPath == null
+          ? const SizedBox.shrink()
+          : Image.file(
+              File(shownPath),
+              fit: BoxFit.contain,
+              gaplessPlayback: true,
+            );
+    }
+    if (selected.status == ShotStatus.pending) {
+      return const Center(
+        key: Key('preview_pending'),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircularProgressIndicator(color: Colors.white),
+            SizedBox(height: 16),
+            Text(
+              'Converting…',
+              style: TextStyle(color: Colors.white, fontSize: 16),
+            ),
+          ],
+        ),
+      );
+    }
+    return Center(
+      key: const Key('preview_failed'),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.error_outline, color: Colors.red, size: 48),
+          const SizedBox(height: 12),
+          Text(
+            'Could not convert ${selected.fileName}',
+            style: const TextStyle(color: Colors.white),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 16),
+          OutlinedButton.icon(
+            key: const Key('retake_shot_button'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: Colors.white,
+              side: const BorderSide(color: Colors.white),
+            ),
+            onPressed: () => _retakeShot(selected),
+            icon: const Icon(Icons.refresh),
+            label: const Text('Retake this photo'),
+          ),
         ],
       ),
     );
@@ -295,7 +467,8 @@ class _PreviewPageState extends State<PreviewPage> {
     );
   }
 
-  /// Batch-mode header: the order plus how many photos are staged so far.
+  /// Batch-mode header: the order plus how many photos are staged so far
+  /// (pending and flagged entries included — they are part of the batch).
   /// Bold to stand apart from the plain single-shot chip.
   Widget _batchChip(int count) {
     final noun = count == 1 ? 'photo' : 'photos';
@@ -309,9 +482,12 @@ class _PreviewPageState extends State<PreviewPage> {
   /// Thumbnails of every staged shot, oldest first; the one shown
   /// full-screen is highlighted, and tapping a tile makes IT the
   /// full-screen shot (tapping the newest's tile is the way back).
-  /// Each tile caps the decode at the tile size × device pixel ratio —
-  /// without [Image.file.cacheWidth] a 12 MP shot decodes to ~48 MB of
-  /// pixels per 56 px thumbnail (jank + memory pressure once a batch grows).
+  /// PENDING tiles spin (no file to decode yet); FAILED tiles carry an
+  /// error tint — tapping one reviews the failure full-screen, where the
+  /// retake button lives. Each ready tile caps the decode at the tile
+  /// size × device pixel ratio — without [Image.file.cacheWidth] a 12 MP
+  /// shot decodes to ~48 MB of pixels per 56 px thumbnail (jank + memory
+  /// pressure once a batch grows).
   Widget _thumbStrip(List<Shot> shots) {
     final cacheWidth = (56 * MediaQuery.devicePixelRatioOf(context)).round();
     final selected = _selectedIndex ?? shots.length - 1;
@@ -322,29 +498,57 @@ class _PreviewPageState extends State<PreviewPage> {
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         itemCount: shots.length,
-        itemBuilder: (context, i) => GestureDetector(
-          onTap: () => setState(() => _selectedIndex = i),
-          child: Container(
-            width: 56,
-            height: 56,
-            decoration: BoxDecoration(
-              border: Border.all(
-                color: i == selected ? Colors.white : Colors.white30,
-                width: 2,
+        itemBuilder: (context, i) {
+          final shot = shots[i];
+          return GestureDetector(
+            onTap: () => setState(() => _selectedIndex = i),
+            child: Container(
+              width: 56,
+              height: 56,
+              decoration: BoxDecoration(
+                border: Border.all(
+                  color: i == selected ? Colors.white : Colors.white30,
+                  width: 2,
+                ),
+                borderRadius: BorderRadius.circular(4),
               ),
-              borderRadius: BorderRadius.circular(4),
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(2),
-              child: Image.file(
-                File(shots[i].localPath),
-                fit: BoxFit.cover,
-                gaplessPlayback: true,
-                cacheWidth: cacheWidth,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(2),
+                child: switch (shot.status) {
+                  ShotStatus.ready => Image.file(
+                    File(shot.localPath),
+                    fit: BoxFit.cover,
+                    gaplessPlayback: true,
+                    cacheWidth: cacheWidth,
+                  ),
+                  ShotStatus.pending => Container(
+                    key: Key('thumb_pending_$i'),
+                    color: Colors.black26,
+                    alignment: Alignment.center,
+                    child: const SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                  ShotStatus.failed => Container(
+                    key: Key('thumb_failed_$i'),
+                    color: Colors.red.withValues(alpha: 0.35),
+                    alignment: Alignment.center,
+                    child: const Icon(
+                      Icons.error_outline,
+                      color: Colors.white,
+                      size: 22,
+                    ),
+                  ),
+                },
               ),
             ),
-          ),
-        ),
+          );
+        },
         separatorBuilder: (_, _) => const SizedBox(width: 8),
       ),
     );
@@ -359,6 +563,37 @@ class _PreviewPageState extends State<PreviewPage> {
       );
     }
     return _pill(color: Colors.green, text: 'Uploaded: ${_uploadedName ?? ''}');
+  }
+
+  /// Flags conversion failures at review time: staged entries that will
+  /// NOT be part of any upload until retaken. Visible in every state
+  /// except mid-upload (the overlay covers the page then).
+  Widget _conversionBanner() {
+    final failed = _failedShots;
+    final n = failed.length;
+    return Container(
+      key: const Key('conversion_banner'),
+      width: double.infinity,
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.red,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '$n photo${n == 1 ? '' : 's'} failed to convert — retake '
+            'before upload:',
+            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+          ),
+          for (final s in failed)
+            Text(s.fileName, style: const TextStyle(color: Colors.white)),
+        ],
+      ),
+    );
   }
 
   Widget _pill({
@@ -402,7 +637,7 @@ class _PreviewPageState extends State<PreviewPage> {
             style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
           ),
           if (lines.isEmpty)
-            Text(_error ?? 'unknown error', style: const TextStyle(color: Colors.white))
+            Text(_error ?? 'nothing to upload', style: const TextStyle(color: Colors.white))
           else
             ...lines.map((line) => Text(line, style: const TextStyle(color: Colors.white))),
         ],
@@ -437,12 +672,74 @@ class _PreviewPageState extends State<PreviewPage> {
     );
   }
 
+  /// The gated Upload button — shown while conversions are pending. Still
+  /// pressable: the tap ARMS the gate ("start the upload once everything
+  /// has converted"), and the session listener auto-starts it the moment
+  /// the last conversion settles. Capture never blocks on it — Add photo
+  /// stays available alongside.
+  FilledButton _waitingButton({Key? key}) {
+    final n = widget.session.pendingShots.length;
+    return _filled(
+      key: key ?? const Key('waiting_button'),
+      icon: Icons.hourglass_top,
+      label: 'Waiting for $n conversion${n == 1 ? '' : 's'}…',
+      onPressed: _uploadAll,
+    );
+  }
+
+  /// Retake-first escape when a conversion failure holds the batch: drop
+  /// the oldest flagged entry and reopen the camera on the same session.
+  Widget _retakeFailedButton() {
+    return _outlined(
+      icon: Icons.refresh,
+      label: 'Retake failed photo',
+      onPressed: _firstFailed == null ? null : () => _retakeShot(_firstFailed!),
+    );
+  }
+
   Widget _bottomButtons() {
     switch (_status) {
       case _UploadStatus.uploading:
         return const SizedBox.shrink();
 
+      case _UploadStatus.waiting:
+        if (_batchOn) {
+          return Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              _outlined(
+                icon: Icons.refresh,
+                label: 'Retake',
+                onPressed: () => _openCamera(removeLast: true),
+              ),
+              _outlined(
+                key: const Key('add_photo_button'),
+                icon: Icons.add_a_photo,
+                label: 'Add photo',
+                onPressed: () => _openCamera(removeLast: false),
+              ),
+              _waitingButton(),
+            ],
+          );
+        }
+        return _waitingButton();
+
       case _UploadStatus.done:
+        if (_failedShots.isNotEmpty) {
+          // Uploaded everything convertible, but flagged entries remain:
+          // retake-first, then the flow re-reviews and re-uploads them.
+          return Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              _retakeFailedButton(),
+              _filled(
+                icon: Icons.qr_code_scanner,
+                label: 'Scan next QR code',
+                onPressed: _scanNext,
+              ),
+            ],
+          );
+        }
         if (_batchOn) {
           return Row(
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
@@ -482,11 +779,14 @@ class _PreviewPageState extends State<PreviewPage> {
           return Row(
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
             children: [
-              _outlined(
-                icon: Icons.refresh,
-                label: 'Retry upload',
-                onPressed: _uploadAll,
-              ),
+              if (_readyShots.isNotEmpty)
+                _outlined(
+                  icon: Icons.refresh,
+                  label: 'Retry upload',
+                  onPressed: _uploadAll,
+                )
+              else
+                _retakeFailedButton(),
               _filled(
                 icon: Icons.qr_code_scanner,
                 label: 'Scan next QR code',
@@ -496,7 +796,8 @@ class _PreviewPageState extends State<PreviewPage> {
           );
         }
         // Today's single-shot failed row (Retake stays; the QR icon above
-        // is the scan-next escape, as before).
+        // is the scan-next escape, as before). With nothing convertible
+        // left, Retry is pointless — Retake is the way forward.
         return Row(
           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
           children: [
@@ -505,12 +806,14 @@ class _PreviewPageState extends State<PreviewPage> {
               label: 'Retake',
               onPressed: () => _openCamera(removeLast: true),
             ),
-            _filled(icon: Icons.refresh, label: 'Retry upload', onPressed: _uploadAll),
+            if (_readyShots.isNotEmpty)
+              _filled(icon: Icons.refresh, label: 'Retry upload', onPressed: _uploadAll),
           ],
         );
 
       case _UploadStatus.idle:
         if (_batchOn) {
+          final pending = widget.session.pendingShots.isNotEmpty;
           return Row(
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
             children: [
@@ -519,22 +822,39 @@ class _PreviewPageState extends State<PreviewPage> {
                 label: 'Retake',
                 onPressed: () => _openCamera(removeLast: true),
               ),
+              // Capture never blocks on conversions: Add photo stays live
+              // while shots are pending — the next photo can be taken
+              // immediately (the spec's point).
               _outlined(
                 key: const Key('add_photo_button'),
                 icon: Icons.add_a_photo,
                 label: 'Add photo',
                 onPressed: () => _openCamera(removeLast: false),
               ),
-              _filled(
-                key: const Key('upload_all_button'),
-                icon: Icons.cloud_upload,
-                label: 'Upload all',
-                onPressed: _uploadAll,
-              ),
+              if (pending)
+                _waitingButton()
+              else if (_readyShots.isNotEmpty)
+                _filled(
+                  key: const Key('upload_all_button'),
+                  icon: Icons.cloud_upload,
+                  label: 'Upload all',
+                  onPressed: _uploadAll,
+                )
+              else
+                _retakeFailedButton(),
             ],
           );
         }
-        // Today's single-shot idle row.
+        // Today's single-shot idle row — gated when conversions are still
+        // in flight, retake-first when everything staged failed.
+        if (widget.session.pendingShots.isNotEmpty) return _waitingButton();
+        if (_readyShots.isEmpty) {
+          return _outlined(
+            icon: Icons.refresh,
+            label: 'Retake',
+            onPressed: () => _openCamera(removeLast: true),
+          );
+        }
         return Row(
           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
           children: [

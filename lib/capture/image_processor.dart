@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_image_compress/flutter_image_compress.dart';
@@ -11,10 +12,12 @@ import 'session.dart';
 /// cap so neither image_picker nor a compress plugin can receive one.
 int? sanitizeMaxEdge(int? edge) => (edge == null || edge <= 0) ? null : edge;
 
-/// The finalized upload name for a shot about to be materialized: the
-/// capture-time stamp plus the session's next shot index (D5). Shared by
-/// every implementation so the 4-part contract has one source.
-String _finalName(CaptureSession session, UploadPrefs prefs) =>
+/// The upload name for a shot being admitted NOW: the capture-time stamp
+/// plus the session's next shot index. Called at PICK time — admission
+/// reserves the name before any conversion runs, so two quick picks get
+/// 001/002 deterministically even when their conversions finish much
+/// later (the 4-part contract has this one source).
+String reserveShotName(CaptureSession session, UploadPrefs prefs) =>
     buildUploadFileName(
       orderNumber: session.orderNumber,
       admittedAt: DateTime.now(),
@@ -22,23 +25,19 @@ String _finalName(CaptureSession session, UploadPrefs prefs) =>
       format: prefs.format,
     );
 
-/// Turns a picked file into a staged [Shot]: bytes land inside
-/// [CaptureSession.dir] under the finalized upload name. Injectable so
-/// tests can substitute [CopyOnlyProcessor] instead of the native codec
-/// (mirrors the `SettingsStore` seam).
+/// Turns a picked file into processed bytes on disk. Injectable so tests
+/// can substitute [CopyOnlyProcessor] instead of the native codec (mirrors
+/// the `SettingsStore` seam).
 abstract class ImageProcessor {
-  /// Materializes [pickedPath] into [session] storage and returns the
-  /// resulting [Shot] — localPath inside [CaptureSession.dir], fileName
-  /// from the 4-part rule stamped with `session.nextIndex`.
+  /// Writes [pickedPath]'s PROCESSED bytes to [destPath] — a session-dir
+  /// path whose name was already reserved via [reserveShotName]. The
+  /// reserved name's extension is the contract: `.png` must produce the
+  /// lossless full-size conversion, anything else the pick-time JPEG
+  /// as-is (quality/edge caps were applied by image_picker).
   ///
-  /// Does NOT call [CaptureSession.add]: admission is the caller's job
-  /// (`try { session.add(await process(...)) }`), so a throw here leaves
-  /// the session — shots and nextIndex — exactly as it was.
-  Future<Shot> process({
-    required String pickedPath,
-    required UploadPrefs prefs,
-    required CaptureSession session,
-  });
+  /// Throws on failure and never touches the session — admission state
+  /// ([ShotStatus.pending] → ready/failed) is [admitPicked]'s job.
+  Future<void> process({required String pickedPath, required String destPath});
 }
 
 /// The production processor. JPEG needs no codec here — quality/edge caps
@@ -57,15 +56,11 @@ class NativeImageProcessor implements ImageProcessor {
   static const int _fullSizeEdge = 100000;
 
   @override
-  Future<Shot> process({
+  Future<void> process({
     required String pickedPath,
-    required UploadPrefs prefs,
-    required CaptureSession session,
+    required String destPath,
   }) async {
-    final fileName = _finalName(session, prefs);
-    final target = File('${session.dir.path}/$fileName');
-
-    if (prefs.format == ImageFormat.png) {
+    if (destPath.endsWith('.png')) {
       final bytes = await FlutterImageCompress.compressWithFile(
         pickedPath,
         minWidth: _fullSizeEdge,
@@ -75,34 +70,103 @@ class NativeImageProcessor implements ImageProcessor {
       if (bytes == null || bytes.isEmpty) {
         throw Exception('PNG conversion produced no data for $pickedPath');
       }
-      await target.writeAsBytes(bytes, flush: true);
-      return Shot(localPath: target.path, fileName: fileName);
+      await File(destPath).writeAsBytes(bytes, flush: true);
+      return;
     }
 
     // JPEG: the bytes are already correct — same copy as the test seam.
-    return const CopyOnlyProcessor().process(
+    await const CopyOnlyProcessor().process(
       pickedPath: pickedPath,
-      prefs: prefs,
-      session: session,
+      destPath: destPath,
     );
   }
 }
 
-/// Pure `File.copy` with the same naming rule — no platform channels, so
-/// unit tests can run the real seam on the host. NOT the production
-/// processor: it skips PNG conversion entirely.
+/// Pure `File.copy` to the reserved path — no platform channels, so unit
+/// tests can run the real seam on the host. NOT the production processor:
+/// it skips PNG conversion entirely.
 class CopyOnlyProcessor implements ImageProcessor {
   const CopyOnlyProcessor();
 
   @override
-  Future<Shot> process({
+  Future<void> process({
     required String pickedPath,
-    required UploadPrefs prefs,
-    required CaptureSession session,
+    required String destPath,
   }) async {
-    final fileName = _finalName(session, prefs);
-    final target = File('${session.dir.path}/$fileName');
-    await File(pickedPath).copy(target.path);
-    return Shot(localPath: target.path, fileName: fileName);
+    await File(pickedPath).copy(destPath);
+  }
+}
+
+/// One fire-and-forget admission: the [pending] entry now staged in the
+/// session (its name and index were reserved synchronously), plus the
+/// [settled] future that completes once the background conversion has
+/// flipped that entry to ready or failed. Tests await [settled]; the UI
+/// does not — it re-renders off the session's notifications.
+class Admission {
+  final Shot pending;
+  final Future<void> settled;
+
+  const Admission(this.pending, this.settled);
+}
+
+/// Admits a fresh pick WITHOUT blocking on conversion: reserves the
+/// upload name and shot index at pick time, stages a PENDING entry, and
+/// launches the processing in the background. The caller navigates on
+/// immediately — the next photo can be taken while this one converts.
+///
+/// The background step settles the entry in place via
+/// [CaptureSession.replace]: ready (processed file at [Shot.localPath])
+/// or failed (no file; the entry stays staged flagged for retake, and
+/// upload skips it). If the entry was removed mid-conversion (a retake
+/// cancelled it) the just-written bytes are dropped — unless the name was
+/// re-reserved by a replacement shot, in which case the file is left for
+/// that shot's own conversion to own (a late straggler may overwrite it;
+/// the startup sweep catches anything left behind).
+Admission admitPicked({
+  required String pickedPath,
+  required UploadPrefs prefs,
+  required CaptureSession session,
+  required ImageProcessor processor,
+}) {
+  final fileName = reserveShotName(session, prefs);
+  final pending = Shot(
+    localPath: '${session.dir.path}/$fileName',
+    fileName: fileName,
+    status: ShotStatus.pending,
+  );
+  // The add IS the reservation: nextIndex advances now, before any slow
+  // conversion, so a quick follow-up pick numbers deterministically.
+  session.add(pending);
+  return Admission(pending, _settleAdmission(pending, pickedPath, session, processor));
+}
+
+/// The background half of [admitPicked]: run the conversion, then settle
+/// the PENDING entry — or clean up after it if the entry is gone.
+Future<void> _settleAdmission(
+  Shot pending,
+  String pickedPath,
+  CaptureSession session,
+  ImageProcessor processor,
+) async {
+  try {
+    await processor.process(pickedPath: pickedPath, destPath: pending.localPath);
+    if (session.replace(pending, pending.copyWith(status: ShotStatus.ready))) {
+      return;
+    }
+    // Entry removed while converting (retake cancelled it). Drop the bytes
+    // we just wrote — unless a replacement shot re-reserved the name, in
+    // which case the path is that shot's now.
+    if (!session.claimsFile(pending.fileName)) {
+      try {
+        final f = File(pending.localPath);
+        if (await f.exists()) await f.delete();
+      } catch (_) {
+        /* best effort — the startup sweep catches stragglers */
+      }
+    }
+  } catch (_) {
+    // Conversion failed: flag the entry, keep it staged for retake. The
+    // batch (and every other conversion) is untouched.
+    session.replace(pending, pending.copyWith(status: ShotStatus.failed));
   }
 }

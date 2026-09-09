@@ -54,6 +54,7 @@ Future<void> _ioSettle(
   WidgetTester tester,
   bool Function() done, {
   int maxRounds = 40,
+  String? reason,
 }) async {
   for (var round = 0; round < maxRounds && !done(); round++) {
     await tester.runAsync(
@@ -62,10 +63,11 @@ Future<void> _ioSettle(
     await tester.pump();
   }
   expect(done(), isTrue,
-      reason: 'condition not reached after $maxRounds IO-settle rounds');
+      reason: reason ??
+          'condition not reached after $maxRounds IO-settle rounds');
 }
 
-/// Real session with [count] real staged files.
+/// Real session with [count] real staged READY files.
 Future<CaptureSession> _sessionOf(String orderNumber, int count) async {
   final s = await CaptureSession.create(orderNumber);
   _created.add(s.dir);
@@ -95,36 +97,42 @@ AppSettings _settings({required bool batch}) => AppSettings(
   upload: UploadPrefs(batchMode: batch, format: ImageFormat.png),
 );
 
-/// The seam shape PreviewPage expects: the extra named [onProgress] mirrors
-/// the real `uploadSession` signature so the default (real) uploader is
-/// directly assignable; fakes ignore the callback.
+/// The seam shape PreviewPage expects: the extra named parameters mirror
+/// the real `uploadSession` signature (only = the READY subset the page
+/// uploads) so the default (real) uploader is directly assignable; fakes
+/// record the subset and ignore the callback unless they need it.
 typedef _Uploader =
     Future<UploadSummary> Function(
       CaptureSession,
       AppSettings, {
+      List<Shot>? only,
       void Function(int done, int total)? onProgress,
     });
 
-/// Records every call and replays a scripted [UploadSummary] per pass. The
-/// fake does NOT touch the session's files — how the real uploader mutates
-/// staged state is covered in test/uploader_test.dart; here it only feeds
-/// the page's state machine.
+/// Records every call (session + the READY subset it was handed) and
+/// replays a scripted [UploadSummary] per pass. The fake does NOT touch
+/// the session's files — how the real uploader mutates staged state is
+/// covered in test/uploader_test.dart; here it only feeds the page's
+/// state machine.
 class _FakeUploader {
   final List<CaptureSession> sessions = [];
+  final List<List<Shot>?> onlys = [];
   final List<UploadSummary> next = [];
 
   Future<UploadSummary> call(
     CaptureSession session,
     AppSettings settings, {
+    List<Shot>? only,
     void Function(int done, int total)? onProgress,
   }) {
     sessions.add(session);
+    onlys.add(only);
     return Future.value(next.removeAt(0));
   }
 }
 
-/// A well-formed [UploadSummary]: one [UploadOutcome] per [shots], the ones
-/// in [failed] marked !ok with a canned error.
+/// A well-formed [UploadSummary] over [shots]: the ones in [failed] marked
+/// !ok with a canned error.
 UploadSummary _summary(List<Shot> shots, {Set<int> failed = const {}}) =>
     UploadSummary([
       for (var i = 0; i < shots.length; i++)
@@ -174,36 +182,47 @@ List<Image> _thumbs(WidgetTester tester) => tester
     )
     .toList();
 
-/// Copies the picked bytes into the session dir under the 4-part name —
+/// Copies the picked bytes into the session dir under the reserved name —
 /// the same shape the real processor returns, minus any codec.
 class _CopyProcessor implements ImageProcessor {
   const _CopyProcessor();
 
   @override
-  Future<Shot> process({
+  Future<void> process({
     required String pickedPath,
-    required UploadPrefs prefs,
-    required CaptureSession session,
+    required String destPath,
   }) async {
-    final fileName = '100438_20260908_101112_'
-        '${session.nextIndex.toString().padLeft(3, '0')}.png';
-    final target = File('${session.dir.path}/$fileName');
-    await File(pickedPath).copy(target.path);
-    return Shot(localPath: target.path, fileName: fileName);
+    await File(pickedPath).copy(destPath);
   }
 }
 
-/// Always throws the way a codec failure would — before any Shot exists,
-/// so the caller's `add` is never reached.
+/// Always throws the way a codec failure would — admission flags the
+/// PENDING entry failed instead of abandoning the flow.
 class _ThrowingProcessor implements ImageProcessor {
   const _ThrowingProcessor();
 
   @override
-  Future<Shot> process({
+  Future<void> process({
     required String pickedPath,
-    required UploadPrefs prefs,
-    required CaptureSession session,
+    required String destPath,
   }) async => throw Exception('codec failed');
+}
+
+/// Never settles — the entry stays PENDING for as long as the test wants,
+/// released by completing [gate] (the slow PNG codec stand-in).
+class _HeldProcessor implements ImageProcessor {
+  _HeldProcessor(this.gate);
+
+  final Completer<void> gate;
+
+  @override
+  Future<void> process({
+    required String pickedPath,
+    required String destPath,
+  }) async {
+    await gate.future;
+    await File(pickedPath).copy(destPath);
+  }
 }
 
 /// Feeds [ImagePicker.pickImage] from the platform-interface seam — no
@@ -270,26 +289,6 @@ class _CrashingPickerPlatform extends ImagePickerPlatform {
     code: 'camera_error',
     message: 'camera_in_use',
   );
-}
-
-/// The admission wrapper CameraPage wires: process, then — and only then —
-/// add. Plain `test` (no FakeAsync), so the real file IO is fine.
-Future<void> _admit(
-  ImageProcessor processor, {
-  required String pickedPath,
-  required UploadPrefs prefs,
-  required CaptureSession session,
-}) async {
-  try {
-    final shot = await processor.process(
-      pickedPath: pickedPath,
-      prefs: prefs,
-      session: session,
-    );
-    session.add(shot);
-  } catch (_) {
-    // CameraPage shows the snackbar; the session stays untouched.
-  }
 }
 
 void main() {
@@ -366,8 +365,8 @@ void main() {
       expect(_thumbs(tester), hasLength(3));
     });
 
-    testWidgets('Upload all → uploader called once with the session; '
-        'allOk → done banner counts photos', (tester) async {
+    testWidgets('Upload all → uploader called once with the session and the '
+        'READY subset; allOk → done banner counts photos', (tester) async {
       final session = await _real(tester, () => _sessionOf('100438', 3));
       final fake = _FakeUploader()..next.add(_summary(session.shots));
       await _pumpPreview(
@@ -381,6 +380,8 @@ void main() {
       await tester.pump();
 
       expect(fake.sessions, [session]);
+      expect(fake.onlys.single, session.shots.toList(),
+          reason: 'all shots ready → the subset IS the staged list');
       expect(find.text('Uploaded 3 photos'), findsOneWidget);
     });
 
@@ -396,7 +397,7 @@ void main() {
         tester,
         session: session,
         batch: true,
-        uploader: (s, settings, {onProgress}) async {
+        uploader: (s, settings, {only, onProgress}) async {
           onProgress?.call(1, 2); // shot 1 processed
           await Completer<void>().future; // shot 2 hangs BEFORE its tick
           // Never reached — the hang above IS the scenario under test.
@@ -590,6 +591,329 @@ void main() {
     });
   });
 
+  group('PreviewPage background conversion (Task 6.6)', () {
+    testWidgets('PENDING thumb: spinner tile, no Image decode; strip and '
+        'chip still count it; ready siblings unaffected', (tester) async {
+      final session = await _real(tester, () => _sessionOf('100438', 1));
+      final gate = Completer<void>();
+      final picked = await _real(tester, () => _pickedFile('IMG_0002.jpg'));
+
+      await _pumpPreview(tester, session: session, batch: true);
+      // Admit the slow pick while the review page is up — exactly what the
+      // CameraPage hand-off leaves behind: a pending entry whose conversion
+      // is still in flight.
+      admitPicked(
+        pickedPath: picked.path,
+        prefs: _settings(batch: true).upload,
+        session: session,
+        processor: _HeldProcessor(gate),
+      );
+      await tester.pump();
+
+      expect(find.text('Order: 100438 — 2 photos'), findsOneWidget,
+          reason: 'the pending entry is part of the batch count');
+      expect(find.byKey(const Key('thumb_pending_1')), findsOneWidget,
+          reason: 'the pending tile renders the spinner overlay');
+      expect(_thumbs(tester), hasLength(1),
+          reason: 'the pending tile decodes NO image (no file yet)');
+
+      // Upload all is gated while the conversion runs.
+      expect(find.byKey(const Key('upload_all_button')), findsNothing);
+      expect(find.byKey(const Key('waiting_button')), findsOneWidget);
+      expect(find.text('Waiting for 1 conversion…'), findsOneWidget);
+      expect(find.text('Add photo'), findsOneWidget,
+          reason: 'capture never blocks on a pending conversion');
+
+      gate.complete();
+      await _ioSettle(
+        tester,
+        () => session.shots[1].status == ShotStatus.ready,
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('thumb_pending_1')), findsNothing);
+      expect(_thumbs(tester), hasLength(2),
+          reason: 'the settled tile now decodes its image');
+      expect(find.text('Waiting for 1 conversion…'), findsNothing);
+      expect(find.byKey(const Key('upload_all_button')), findsOneWidget,
+          reason: 'the gate opened — upload is back');
+    });
+
+    testWidgets('Upload all with a pending shot WAITS: uploader not called '
+        'until the conversion settles, then starts on the ready subset',
+        (tester) async {
+      final session = await _real(tester, () => _sessionOf('100438', 1));
+      final ready = session.shots.single;
+      final gate = Completer<void>();
+      final picked = await _real(tester, () => _pickedFile('IMG_0002.jpg'));
+
+      // The slow pick was admitted before review — the entry is pending.
+      final admission = admitPicked(
+        pickedPath: picked.path,
+        prefs: _settings(batch: true).upload,
+        session: session,
+        processor: _HeldProcessor(gate),
+      );
+
+      final fake = _FakeUploader()
+        ..next.add(
+          // The subset is cut at START time — after the settle, so the
+          // pending-turned-ready shot is in it.
+          _summary([ready, admission.pending.copyWith(status: ShotStatus.ready)]),
+        );
+      await _pumpPreview(
+        tester,
+        session: session,
+        batch: true,
+        uploader: fake.call,
+      );
+
+      await tester.tap(find.byKey(const Key('waiting_button')));
+      await tester.pump();
+      expect(fake.sessions, isEmpty,
+          reason: 'a pending conversion gates the upload');
+      expect(find.text('Waiting for 1 conversion…'), findsOneWidget);
+
+      // The conversion settles (ready) → the upload starts BY ITSELF. The
+      // done banner is the end signal (the fake completes synchronously
+      // once invoked).
+      gate.complete();
+      await _ioSettle(
+        tester,
+        () => find.text('Uploaded 2 photos').evaluate().isNotEmpty,
+      );
+      await tester.pumpAndSettle();
+
+      expect(fake.sessions, [session],
+          reason: 'the gated upload auto-started on settle');
+      expect(fake.onlys.single!.map((s) => s.fileName).toList(),
+          [ready.fileName, admission.pending.fileName],
+          reason: 'the subset is cut at start: every staged shot, now all '
+              'ready — nothing was skipped');
+      expect(
+        fake.onlys.single!.every((s) => s.status == ShotStatus.ready),
+        isTrue,
+        reason: 'a PENDING or FAILED entry never reaches the uploader',
+      );
+      expect(find.text('Uploaded 2 photos'), findsOneWidget);
+    });
+
+    testWidgets('FAILED conversion: error tile + banner, upload passes the '
+        'ready shots only, failed stays staged', (tester) async {
+      final session = await _real(tester, () => _sessionOf('100438', 2));
+      final readyShots = session.shots.toList();
+      final picked = await _real(tester, () => _pickedFile('IMG_0003.jpg'));
+
+      final admission = admitPicked(
+        pickedPath: picked.path,
+        prefs: _settings(batch: true).upload,
+        session: session,
+        processor: const _ThrowingProcessor(),
+      );
+      await admission.settled;
+      final failed = session.shots.last;
+      expect(failed.status, ShotStatus.failed);
+
+      final fake = _FakeUploader()..next.add(_summary(readyShots));
+      await _pumpPreview(
+        tester,
+        session: session,
+        batch: true,
+        uploader: fake.call,
+      );
+
+      expect(find.byKey(const Key('thumb_failed_2')), findsOneWidget,
+          reason: 'the failed tile shows the error tint');
+      expect(find.byKey(const Key('conversion_banner')), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('conversion_banner')),
+          matching: find.textContaining(failed.fileName),
+        ),
+        findsOneWidget,
+        reason: 'the banner names the failed conversion',
+      );
+
+      await tester.tap(find.byKey(const Key('upload_all_button')));
+      await tester.pumpAndSettle();
+
+      expect(fake.sessions, [session]);
+      expect(fake.onlys.single, readyShots,
+          reason: 'the failed entry is NOT in the upload subset');
+      expect(find.text('Uploaded 2 photos'), findsOneWidget);
+      expect(session.shots, hasLength(3),
+          reason: 'the failed entry stays staged');
+      expect(find.byKey(const Key('conversion_banner')), findsOneWidget,
+          reason: 'still flagged after the upload');
+      expect(find.text('Retake failed photo'), findsOneWidget,
+          reason: 'the done row offers the retake-first escape');
+    });
+
+    testWidgets('tapping a FAILED thumbnail reviews it full-screen with a '
+        'retake button; retake drops the entry and reopens the camera',
+        (tester) async {
+      final session = await _real(tester, () => _sessionOf('100438', 1));
+      final readyShot = session.shots.single;
+      final picked = await _real(tester, () => _pickedFile('IMG_0002.jpg'));
+
+      final admission = admitPicked(
+        pickedPath: picked.path,
+        prefs: _settings(batch: true).upload,
+        session: session,
+        processor: const _ThrowingProcessor(),
+      );
+      await admission.settled;
+      final failed = session.shots.last;
+
+      await _pumpPreview(tester, session: session, batch: true);
+
+      // Tap the failed tile (second in the strip).
+      final stripTiles = find.descendant(
+        of: find.byKey(const Key('thumb_strip')),
+        matching: find.byType(GestureDetector),
+      );
+      await tester.tap(stripTiles.last);
+      await tester.pump();
+
+      expect(find.byKey(const Key('preview_failed')), findsOneWidget);
+      expect(find.text('Could not convert ${failed.fileName}'),
+          findsOneWidget);
+      expect(find.byKey(const Key('retake_shot_button')), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('retake_shot_button')));
+      expect(session.shots, [readyShot],
+          reason: 'only the failed entry is dropped');
+
+      // The retake relaunches the camera (transient) on the same session;
+      // its scriptless picker cancels, so the round trip lands on a FRESH
+      // preview — the chip dropping to '1 photo' proves the camera ran.
+      await _ioSettle(
+        tester,
+        () => find.text('Order: 100438 — 1 photo').evaluate().isNotEmpty,
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(PreviewPage), findsOneWidget);
+      expect(session.shots, [readyShot],
+          reason: 'the batch survives the retake round trip minus the '
+              'failed entry');
+    });
+
+    testWidgets('full-screen view of a PENDING shot shows the spinner '
+        '(no file decode, no crash)', (tester) async {
+      final session = await _real(tester, () => _sessionOf('100438', 1));
+      final gate = Completer<void>();
+      final picked = await _real(tester, () => _pickedFile('IMG_0002.jpg'));
+
+      admitPicked(
+        pickedPath: picked.path,
+        prefs: _settings(batch: true).upload,
+        session: session,
+        processor: _HeldProcessor(gate),
+      );
+
+      await _pumpPreview(tester, session: session, batch: true);
+
+      // The newest shot IS the pending one — the default full-screen shows
+      // the conversion spinner, and NO FileImage decodes (there is no file
+      // yet). The strip's empty-area Image? None either — the tile renders
+      // the spinner container instead.
+      expect(find.byKey(const Key('preview_pending')), findsOneWidget);
+      expect(find.text('Converting…'), findsOneWidget);
+      expect(
+        find.byWidgetPredicate((w) => w is Image && w.image is FileImage),
+        findsNothing,
+        reason: 'there is no file to decode yet',
+      );
+    });
+
+    testWidgets('Retake of a PENDING last shot drops the entry; the late '
+        'conversion is cleaned up (orphan file swept by the settle path)',
+        (tester) async {
+      final session = await _real(tester, () => _sessionOf('100438', 1));
+      final readyShot = session.shots.single;
+      final gate = Completer<void>();
+      final picked = await _real(tester, () => _pickedFile('IMG_0002.jpg'));
+
+      final admission = admitPicked(
+        pickedPath: picked.path,
+        prefs: _settings(batch: true).upload,
+        session: session,
+        processor: _HeldProcessor(gate),
+      );
+      final pending = admission.pending;
+
+      await _pumpPreview(tester, session: session, batch: true);
+
+      await tester.tap(find.text('Retake'));
+      expect(session.shots, [readyShot],
+          reason: 'the pending entry is dropped synchronously');
+
+      // The camera page is up; now let the cancelled conversion finish.
+      // Wait for the copy to LAND first (exists == true), then for the
+      // settle path's cleanup to take it back out — two phases, so the
+      // first round's "absent" can't race the copy.
+      gate.complete();
+      await _ioSettle(
+        tester,
+        () => File(pending.localPath).existsSync(),
+        reason: 'the cancelled conversion still writes its bytes...',
+      );
+      await _ioSettle(
+        tester,
+        () => !File(pending.localPath).existsSync(),
+        reason: '...and the settle path cleans the orphan up',
+      );
+      await tester.pumpAndSettle();
+
+      expect(session.shots, [readyShot],
+          reason: 'the cancelled conversion never re-adds its entry');
+      expect(File(pending.localPath).existsSync(), isFalse,
+          reason: 'the settle path deleted the orphan bytes');
+    });
+
+    testWidgets('single-shot (batch OFF) pending: gated Upload button '
+        'auto-starts on settle', (tester) async {
+      final session = await _real(tester, () => _sessionOf('100438', 0));
+      final gate = Completer<void>();
+      final picked = await _real(tester, () => _pickedFile('IMG_0001.jpg'));
+
+      final admission = admitPicked(
+        pickedPath: picked.path,
+        prefs: _settings(batch: false).upload,
+        session: session,
+        processor: _HeldProcessor(gate),
+      );
+
+      final fake = _FakeUploader()
+        ..next.add(_summary([admission.pending.copyWith(status: ShotStatus.ready)]));
+      await _pumpPreview(
+        tester,
+        session: session,
+        batch: false,
+        uploader: fake.call,
+      );
+
+      expect(find.byKey(const Key('upload_all_button')), findsNothing);
+      expect(find.text('Upload'), findsNothing);
+      expect(find.byKey(const Key('waiting_button')), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('waiting_button')));
+      await tester.pump();
+      expect(fake.sessions, isEmpty, reason: 'still gated');
+
+      gate.complete();
+      await _ioSettle(
+        tester,
+        () => find.textContaining('Uploaded:').evaluate().isNotEmpty,
+      );
+      await tester.pumpAndSettle();
+
+      expect(fake.sessions, [session],
+          reason: 'the gated upload started after settle');
+      expect(find.textContaining('Uploaded:'), findsOneWidget);
+    });
+  });
+
   group('PreviewPage batch OFF (single-shot UX preserved)', () {
     testWidgets('no chip/strip/Add-photo; Upload → done banner shows the '
         'file name; today’s actions present', (tester) async {
@@ -645,8 +969,8 @@ void main() {
   });
 
   group('CameraPage admission', () {
-    testWidgets('processing failure: snackbar shown, session untouched, '
-        'pops back to the shell (session empty)', (tester) async {
+    testWidgets('failed conversion: pending entry admitted, flagged FAILED '
+        'at review — the flow never abandons', (tester) async {
       final session = await _real(
         tester,
         () => CaptureSession.create('100438'),
@@ -667,23 +991,31 @@ void main() {
 
       await _ioSettle(
         tester,
-        () => find.byType(SnackBar).evaluate().isNotEmpty,
+        () => find.byType(PreviewPage).evaluate().isNotEmpty &&
+            session.shots.isNotEmpty &&
+            session.shots.single.status == ShotStatus.failed,
       );
+      await tester.pumpAndSettle();
 
-      // The failure exit: the session is empty, so the failure abandons the
-      // flow — and reclaims the dir (the old screen sat on a retry UI; the
-      // new model has nothing to sit on).
-      expect(find.text('Could not process photo'), findsOneWidget,
-          reason: 'the messenger-held snackbar outlives the exit');
-      expect(session.shots, isEmpty, reason: 'no half-admitted shot');
-      expect(session.nextIndex, 1, reason: 'numbering untouched');
-      await _ioSettle(tester, () => !session.dir.existsSync());
-      expect(session.dir.existsSync(), isFalse,
-          reason: 'empty session dir reclaimed on the failure exit');
+      expect(find.byType(PreviewPage), findsOneWidget,
+          reason: 'the flow continues to review after the pick');
+      expect(session.shots, hasLength(1));
+      expect(session.shots.single.status, ShotStatus.failed);
+      expect(session.shots.single.fileName,
+          matches(RegExp(r'^100438_\d{8}_\d{6}_001\.png$')),
+          reason: 'numbering comes from session.nextIndex at pick time');
+      expect(find.byKey(const Key('conversion_banner')), findsOneWidget,
+          reason: 'review flags the failed conversion immediately');
+      expect(find.byType(SnackBar), findsNothing,
+          reason: 'a conversion failure is review-time state, not an '
+              'abandon-the-flow snackbar anymore');
+      expect(session.dir.existsSync(), isTrue,
+          reason: 'the flagged entry keeps the session dir alive');
     });
 
-    testWidgets('successful pick: admits via the processor and pushes '
-        'PreviewPage with the SAME session', (tester) async {
+    testWidgets('successful pick: admits PENDING via admitPicked and pushes '
+        'PreviewPage; the conversion lands ready behind the navigation',
+        (tester) async {
       final session = await _real(
         tester,
         () => CaptureSession.create('100438'),
@@ -704,8 +1036,9 @@ void main() {
 
       await _ioSettle(
         tester,
-        () => session.shots.isNotEmpty &&
-            find.byType(PreviewPage).evaluate().isNotEmpty,
+        () => find.byType(PreviewPage).evaluate().isNotEmpty &&
+            session.shots.isNotEmpty &&
+            session.shots.single.status == ShotStatus.ready,
       );
 
       expect(
@@ -829,8 +1162,8 @@ void main() {
       expect(session.shots, hasLength(2));
     });
 
-    testWidgets('processing failure with STAGED SHOTS pops back to '
-        'PreviewPage with the snackbar', (tester) async {
+    testWidgets('failed conversion with STAGED SHOTS lands on PreviewPage '
+        'with the failure flagged — batch untouched', (tester) async {
       final session = await _real(tester, () => _sessionOf('100438', 1));
       final shots = session.shots.toList();
       final picked = await _real(tester, () => _pickedFile('IMG_0002.jpg'));
@@ -842,20 +1175,21 @@ void main() {
       await tester.pump(); // post-frame push
       await _ioSettle(
         tester,
-        () => find.byType(PreviewPage).evaluate().isNotEmpty,
+        () => find.byType(PreviewPage).evaluate().isNotEmpty &&
+            session.shots.length == 2 &&
+            session.shots.last.status == ShotStatus.failed,
       );
-      // Settle the pushReplacement transition before asserting: during it,
-      // both scaffolds are root-registered and the snack shows on both.
       await tester.pumpAndSettle();
 
       expect(find.byType(CameraPage), findsNothing);
       expect(find.byType(PreviewPage), findsOneWidget);
-      expect(find.text('Could not process photo'), findsOneWidget,
-          reason: 'the messenger-held snackbar survives the exit');
-      expect(find.text('Order: 100438 — 1 photo'), findsOneWidget);
+      expect(find.text('Order: 100438 — 2 photos'), findsOneWidget,
+          reason: 'the pending pick counts toward the batch, then flags');
+      expect(find.byKey(const Key('conversion_banner')), findsOneWidget);
       expect(File(shots.single.localPath).existsSync(), isTrue,
           reason: 'the staged shot was never touched');
-      expect(session.shots, hasLength(1));
+      expect(session.shots.first.status, ShotStatus.ready);
+      expect(session.shots.last.status, ShotStatus.failed);
     });
 
     testWidgets('picker crash (pickImage throws) abandons to the shell '
@@ -889,39 +1223,45 @@ void main() {
   });
 
   group('admission into an existing batch', () {
-    test('process → add keeps numbering and accumulates shots', () async {
+    test('admitPicked keeps numbering and accumulates shots', () async {
       final session = await _sessionOf('100438', 2);
       final picked = await _pickedFile('IMG_0002.jpg');
 
-      await _admit(
-        const _CopyProcessor(),
+      final admission = admitPicked(
         pickedPath: picked.path,
         prefs: _settings(batch: true).upload,
         session: session,
+        processor: const _CopyProcessor(),
       );
+      await admission.settled;
 
       expect(session.shots, hasLength(3));
       expect(session.shots.last.fileName, matches(RegExp(r'_003\.png$')));
+      expect(session.shots.last.status, ShotStatus.ready);
       expect(File(session.shots.last.localPath).existsSync(), isTrue);
     });
 
-    test('a throwing processor leaves the batch intact', () async {
+    test('a throwing processor flags the entry failed and keeps the batch',
+        () async {
       final session = await _sessionOf('100438', 2);
       final picked = await _pickedFile('IMG_0003.jpg');
 
-      await _admit(
-        const _ThrowingProcessor(),
+      final admission = admitPicked(
         pickedPath: picked.path,
         prefs: _settings(batch: true).upload,
         session: session,
+        processor: const _ThrowingProcessor(),
       );
+      await admission.settled;
 
-      expect(session.shots, hasLength(2));
-      expect(session.nextIndex, 3);
+      expect(session.shots, hasLength(3), reason: 'the failed entry stays');
+      expect(session.shots.last.status, ShotStatus.failed);
+      expect(session.shots.last.fileName, matches(RegExp(r'_003\.png$')),
+          reason: 'the slot keeps its reserved name for the retake');
       expect(
         session.dir.listSync().whereType<File>(),
         hasLength(2),
-        reason: 'nothing half-admitted',
+        reason: 'nothing half-written',
       );
     });
   });

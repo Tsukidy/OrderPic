@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -23,45 +24,6 @@ File _picked(String dirPath, String name) {
   return f;
 }
 
-/// The admission wrapper Task 4.3 wires into the UI: process, then — and
-/// only then — add. Pinned here so a processor throw can be shown to leave
-/// the session (shots and nextIndex) untouched.
-Future<void> _admit(
-  ImageProcessor processor, {
-  required String pickedPath,
-  required UploadPrefs prefs,
-  required CaptureSession session,
-}) async {
-  try {
-    final shot = await processor.process(
-      pickedPath: pickedPath,
-      prefs: prefs,
-      session: session,
-    );
-    session.add(shot);
-  } catch (_) {
-    // The UI guard decides what the user sees (Task 4.3); the batch that
-    // is already admitted stays intact.
-  }
-}
-
-/// ORDER_YYYYMMDD_HHMMSS_NNN.ext, as built by the 4-part rule:
-/// 1 = order, 2 = YYYYMMDD_HHMMSS, 3 = index, 4 = extension.
-final _nameParts = RegExp(r'^(.+)_(\d{8}_\d{6})_(\d{3})\.(jpg|png)$');
-
-/// The stamp segment of a 4-part name as a DateTime.
-DateTime _stamp(Match m) {
-  final s = m.group(2)!;
-  return DateTime(
-    int.parse(s.substring(0, 4)),
-    int.parse(s.substring(4, 6)),
-    int.parse(s.substring(6, 8)),
-    int.parse(s.substring(9, 11)),
-    int.parse(s.substring(11, 13)),
-    int.parse(s.substring(13, 15)),
-  );
-}
-
 void main() {
   tearDown(() {
     for (final d in _created.toList().reversed) {
@@ -82,165 +44,310 @@ void main() {
     });
   });
 
+  group('reserveShotName', () {
+    test('stamps the session NEXT index and the configured extension', () async {
+      final session = await CaptureSession.create('100438');
+      _created.add(session.dir);
+
+      expect(
+        reserveShotName(session, UploadPrefs.defaults),
+        matches(RegExp(r'^100438_\d{8}_\d{6}_001\.jpg$')),
+      );
+      expect(
+        reserveShotName(session, const UploadPrefs(format: ImageFormat.png)),
+        matches(RegExp(r'^100438_\d{8}_\d{6}_001\.png$')),
+      );
+
+      // A staged shot advances what the NEXT reservation gets.
+      session.add(const Shot(localPath: 'x', fileName: '100438_a_001.jpg'));
+      expect(
+        reserveShotName(session, UploadPrefs.defaults),
+        matches(RegExp(r'_002\.jpg$')),
+      );
+    });
+
+    test('two reservations WITHOUT an intervening add would collide — '
+        'admission must add before reserving again', () async {
+      // Documents the invariant the background model depends on: the index
+      // only advances via session.add, and admitPicked adds synchronously.
+      final session = await CaptureSession.create('100438');
+      _created.add(session.dir);
+      final first = reserveShotName(session, UploadPrefs.defaults);
+      expect(first, matches(RegExp(r'_001\.jpg$')));
+      expect(session.nextIndex, 1, reason: 'nothing admitted yet');
+    });
+  });
+
   group('CopyOnlyProcessor.process', () {
-    test('materializes an existing file in session.dir under the 4-part name',
-        () async {
+    test('writes the picked bytes to the given reserved path', () async {
       final session = await CaptureSession.create('100438');
       _created.add(session.dir);
       final picked = _picked(_plant('mmcpic-pick-src').path, 'IMG_0001.jpg');
       final prefs = UploadPrefs.defaults;
+      final fileName = reserveShotName(session, prefs);
+      final dest = '${session.dir.path}/$fileName';
 
-      final shot = await const CopyOnlyProcessor().process(
+      await const CopyOnlyProcessor().process(
         pickedPath: picked.path,
-        prefs: prefs,
-        session: session,
+        destPath: dest,
       );
 
-      final staged = File(shot.localPath);
+      final staged = File(dest);
       expect(staged.existsSync(), isTrue);
-      expect(staged.parent.path, session.dir.path);
-      expect(shot.localPath.endsWith('/${shot.fileName}'), isTrue);
-      expect(shot.fileName, matches(RegExp(r'^100438_\d{8}_\d{6}_001\.jpg$')));
+      expect(fileName, matches(RegExp(r'^100438_\d{8}_\d{6}_001\.jpg$')));
       expect(staged.readAsBytesSync(), picked.readAsBytesSync());
     });
 
-    test('the png format stamps a .png extension on the copied bytes',
+    test('is format-agnostic — it writes wherever it is pointed (a .png '
+        'dest gets the bytes as-is; conversion is the native codec\'s job)',
         () async {
       final session = await CaptureSession.create('100438');
       _created.add(session.dir);
       final picked = _picked(_plant('mmcpic-pick-src').path, 'IMG_0001.jpg');
+      final dest =
+          '${session.dir.path}/${reserveShotName(session, const UploadPrefs(format: ImageFormat.png))}';
 
-      final shot = await const CopyOnlyProcessor().process(
+      await const CopyOnlyProcessor().process(
         pickedPath: picked.path,
-        prefs: const UploadPrefs(format: ImageFormat.png),
-        session: session,
+        destPath: dest,
       );
 
-      expect(shot.fileName, matches(RegExp(r'^100438_\d{8}_\d{6}_001\.png$')));
-      expect(File(shot.localPath).existsSync(), isTrue);
-    });
-
-    test('two admissions in the same second get 001 then 002', () async {
-      final session = await CaptureSession.create('100438');
-      _created.add(session.dir);
-      final picked = _picked(_plant('mmcpic-pick-src').path, 'IMG_0001.jpg');
-      final processor = const CopyOnlyProcessor();
-
-      // Admit between shots — nextIndex only advances on add, so this is
-      // the pattern the index disambiguation (and Task 4.3) depends on.
-      await _admit(
-        processor,
-        pickedPath: picked.path,
-        prefs: UploadPrefs.defaults,
-        session: session,
-      );
-      await _admit(
-        processor,
-        pickedPath: picked.path,
-        prefs: UploadPrefs.defaults,
-        session: session,
-      );
-
-      final names = session.shots.map((s) => s.fileName).toList();
-      // Index is what disambiguates the pair, whichever second they land in.
-      expect(_nameParts.firstMatch(names[0])!.group(3), '001');
-      expect(_nameParts.firstMatch(names[1])!.group(3), '002');
-      expect(names[0], isNot(names[1]));
-      // The two calls are back-to-back, so their stamps are at most one
-      // second apart — i.e. same-second shots differ ONLY by the index.
-      final aStamp = _stamp(_nameParts.firstMatch(names[0])!);
-      final bStamp = _stamp(_nameParts.firstMatch(names[1])!);
-      expect(bStamp.isBefore(aStamp), isFalse);
-      expect(
-        bStamp.difference(aStamp),
-        lessThanOrEqualTo(const Duration(seconds: 1)),
-      );
-    });
-
-    test('does NOT admit the shot — the caller does', () async {
-      final session = await CaptureSession.create('100438');
-      _created.add(session.dir);
-      final picked = _picked(_plant('mmcpic-pick-src').path, 'IMG_0001.jpg');
-      final processor = const CopyOnlyProcessor();
-
-      final shot = await processor.process(
-        pickedPath: picked.path,
-        prefs: UploadPrefs.defaults,
-        session: session,
-      );
-      expect(session.shots, isEmpty);
-      expect(session.nextIndex, 1);
-
-      session.add(shot);
-      expect(session.shots, [shot]);
-      expect(session.nextIndex, 2);
+      expect(dest, matches(RegExp(r'_001\.png$')));
+      expect(File(dest).existsSync(), isTrue);
     });
   });
 
   group('NativeImageProcessor (JPEG branch only — no platform channels)',
       () {
-    test('copies the already-encoded JPEG into the session dir', () async {
+    test('copies the already-encoded JPEG to the reserved path', () async {
       final session = await CaptureSession.create('100438');
       _created.add(session.dir);
       final picked = _picked(_plant('mmcpic-pick-src').path, 'IMG_0001.jpg');
+      final dest =
+          '${session.dir.path}/${reserveShotName(session, UploadPrefs.defaults)}';
 
-      final shot = await const NativeImageProcessor().process(
+      await const NativeImageProcessor().process(
         pickedPath: picked.path,
-        prefs: const UploadPrefs(
-          format: ImageFormat.jpeg,
-          jpegQuality: JpegQuality.original,
-        ),
-        session: session,
+        destPath: dest,
       );
 
-      expect(shot.fileName, matches(RegExp(r'^100438_\d{8}_\d{6}_001\.jpg$')));
-      expect(File(shot.localPath).readAsBytesSync(), picked.readAsBytesSync());
+      expect(dest, matches(RegExp(r'_001\.jpg$')));
+      expect(File(dest).readAsBytesSync(), picked.readAsBytesSync());
     });
   });
 
-  group('admission failure semantics', () {
-    test('a throwing processor leaves the batch intact', () async {
+  group('admitPicked (background admission)', () {
+    test('stages a PENDING entry immediately with the reserved name, and '
+        'nextIndex advances BEFORE the conversion settles', () async {
       final session = await CaptureSession.create('100438');
       _created.add(session.dir);
       final picked = _picked(_plant('mmcpic-pick-src').path, 'IMG_0001.jpg');
 
-      // One shot already admitted — the batch the retry must preserve.
-      await _admit(
-        const CopyOnlyProcessor(),
+      final admission = admitPicked(
         pickedPath: picked.path,
         prefs: UploadPrefs.defaults,
         session: session,
+        processor: const CopyOnlyProcessor(),
       );
-      expect(session.shots, hasLength(1));
-      expect(session.nextIndex, 2);
 
-      await _admit(
-        const ThrowingProcessor(),
+      expect(session.shots, [admission.pending]);
+      expect(admission.pending.status, ShotStatus.pending);
+      expect(admission.pending.fileName, matches(RegExp(r'^100438_\d{8}_\d{6}_001\.jpg$')));
+      expect(session.nextIndex, 2,
+          reason: 'the index is reserved at pick time, not at settle time');
+      // Not settled yet (we have not awaited) — no file required either way
+      // until the copy runs; the entry is pending regardless.
+      expect(admission.pending.localPath,
+          '${session.dir.path}/${admission.pending.fileName}');
+
+      await admission.settled;
+      expect(session.shots.single.status, ShotStatus.ready);
+      expect(File(session.shots.single.localPath).existsSync(), isTrue);
+    });
+
+    test('two quick picks reserve 001/002 even though the first conversion '
+        'is still in flight when the second is admitted', () async {
+      final session = await CaptureSession.create('100438');
+      _created.add(session.dir);
+      final picked = _picked(_plant('mmcpic-pick-src').path, 'IMG_0001.jpg');
+      final gate = Completer<void>();
+
+      // A processor whose conversion only finishes when released — the
+      // slow PNG codec stand-in.
+      Future<void> gated({required String pickedPath, required String destPath}) =>
+          gate.future.then((_) => File(pickedPath).copy(destPath));
+
+      final slow = admitPicked(
         pickedPath: picked.path,
         prefs: UploadPrefs.defaults,
         session: session,
+        processor: _FunctionalProcessor(gated),
+      );
+      // Second pick while the first conversion is still held.
+      final quick = admitPicked(
+        pickedPath: picked.path,
+        prefs: UploadPrefs.defaults,
+        session: session,
+        processor: const CopyOnlyProcessor(),
       );
 
-      expect(session.shots, hasLength(1));
+      expect(slow.pending.fileName, matches(RegExp(r'_001\.jpg$')));
+      expect(quick.pending.fileName, matches(RegExp(r'_002\.jpg$')),
+          reason: 'the pending first shot already claimed index 1');
+      expect(session.nextIndex, 3);
+      expect(session.pendingShots, hasLength(2),
+          reason: 'both conversions are still in flight — no await yet');
+
+      // The quick one finishes on its own; the slow one stays pending.
+      await quick.settled;
+      expect(session.pendingShots, [slow.pending],
+          reason: 'only the slow one is still converting');
+      expect(session.shots[0].status, ShotStatus.pending);
+      expect(session.shots[1].status, ShotStatus.ready);
+
+      gate.complete();
+      await slow.settled;
+      expect(session.shots.map((s) => s.status).toList(),
+          [ShotStatus.ready, ShotStatus.ready]);
+    });
+
+    test('a failed conversion flags the entry failed and keeps it staged — '
+        'the earlier batch is intact', () async {
+      final session = await CaptureSession.create('100438');
+      _created.add(session.dir);
+      final picked = _picked(_plant('mmcpic-pick-src').path, 'IMG_0001.jpg');
+
+      // One ready shot first — the batch the failure must preserve (its
+      // file on disk, as a real ready shot has).
+      final first = File('${session.dir.path}/a.jpg')..writeAsBytesSync([1]);
+      session.add(Shot(localPath: first.path, fileName: 'a.jpg'));
       expect(session.nextIndex, 2);
-      // Nothing half-written either: no new file appeared in the dir.
-      expect(
-        session.dir.listSync().whereType<File>().length,
-        1,
+
+      final admission = admitPicked(
+        pickedPath: picked.path,
+        prefs: UploadPrefs.defaults,
+        session: session,
+        processor: const ThrowingProcessor(),
       );
+      await admission.settled;
+
+      expect(session.shots, hasLength(2), reason: 'the failed entry stays');
+      expect(session.shots[0].status, ShotStatus.ready);
+      expect(session.shots[1].status, ShotStatus.failed);
+      expect(session.shots[1].fileName, admission.pending.fileName,
+          reason: 'the failed slot keeps its reserved name for the retake');
+      expect(session.dir.listSync().whereType<File>(), hasLength(1),
+          reason: 'the failed conversion left no half-written file');
+    });
+
+    test('a conversion settling after its entry was removed (retake '
+        'cancel) leaves the session alone and drops the written file',
+        () async {
+      final session = await CaptureSession.create('100438');
+      _created.add(session.dir);
+      final picked = _picked(_plant('mmcpic-pick-src').path, 'IMG_0001.jpg');
+      final gate = Completer<void>();
+
+      Future<void> gated({required String pickedPath, required String destPath}) =>
+          gate.future.then((_) => File(pickedPath).copy(destPath));
+
+      final admission = admitPicked(
+        pickedPath: picked.path,
+        prefs: UploadPrefs.defaults,
+        session: session,
+        processor: _FunctionalProcessor(gated),
+      );
+
+      // Retake while converting: the pending entry (and its not-yet-written
+      // file) is dropped.
+      final removed = session.removeLast();
+      expect(removed, admission.pending);
+      await session.deleteLocal(removed!);
+
+      gate.complete();
+      await admission.settled;
+
+      expect(session.shots, isEmpty,
+          reason: 'the cancelled entry was never re-added');
+      expect(session.nextIndex, 1, reason: 'the slot is free for the retake');
+      // The late conversion wrote its bytes anyway — admission cleans up.
+      await _until(() => !File(admission.pending.localPath).existsSync());
+      expect(File(admission.pending.localPath).existsSync(), isFalse,
+          reason: 'the orphan bytes of a cancelled conversion are dropped');
+    });
+
+    test('a conversion settling after the name was re-reserved by a '
+        'replacement shot does not delete the replacement\'s file',
+        () async {
+      final session = await CaptureSession.create('100438');
+      _created.add(session.dir);
+      final picked = _picked(_plant('mmcpic-pick-src').path, 'IMG_0001.jpg');
+      final gate = Completer<void>();
+
+      Future<void> gated({required String pickedPath, required String destPath}) =>
+          gate.future.then((_) => File(pickedPath).copy(destPath));
+
+      final cancelled = admitPicked(
+        pickedPath: picked.path,
+        prefs: UploadPrefs.defaults,
+        session: session,
+        processor: _FunctionalProcessor(gated),
+      );
+
+      // Retake, then admit the replacement — same index, same second → the
+      // same fileName re-reserved.
+      await session.deleteLocal(session.removeLast()!);
+      final replacement = admitPicked(
+        pickedPath: picked.path,
+        prefs: UploadPrefs.defaults,
+        session: session,
+        processor: const CopyOnlyProcessor(),
+      );
+      expect(replacement.pending.fileName, cancelled.pending.fileName,
+          reason: 'the retake re-uses the freed slot (same-second pick)');
+      await replacement.settled;
+
+      gate.complete();
+      await cancelled.settled;
+
+      expect(session.shots, hasLength(1));
+      expect(session.shots.single.status, ShotStatus.ready,
+          reason: 'only the replacement is staged');
+      expect(File(session.shots.single.localPath).existsSync(), isTrue,
+          reason: 'the cancelled conversion must not have deleted it');
     });
   });
 }
 
-/// Always fails the way a real codec failure would — before any Shot
-/// exists, so the caller's `add` is never reached.
+/// Polls [done] on the real event loop (a sync settle may trail the await
+/// by a microtask round that includes real file IO).
+Future<void> _until(bool Function() done) async {
+  for (var i = 0; i < 100 && !done(); i++) {
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+  }
+}
+
+/// Routes process() through an arbitrary function — lets a test hold the
+/// conversion open (the slow-codec stand-in).
+class _FunctionalProcessor implements ImageProcessor {
+  _FunctionalProcessor(this._fn);
+
+  final Future<void> Function({required String pickedPath, required String destPath})
+      _fn;
+
+  @override
+  Future<void> process({required String pickedPath, required String destPath}) =>
+      _fn(pickedPath: pickedPath, destPath: destPath);
+}
+
+/// Always fails the way a real codec failure would — admission flags the
+/// PENDING entry failed; no Shot file ever exists.
 class ThrowingProcessor implements ImageProcessor {
   const ThrowingProcessor();
 
   @override
-  Future<Shot> process({
+  Future<void> process({
     required String pickedPath,
-    required UploadPrefs prefs,
-    required CaptureSession session,
+    required String destPath,
   }) async => throw Exception('codec failed for $pickedPath');
 }

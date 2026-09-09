@@ -61,6 +61,11 @@ String uploadTargetPath({
 /// at all). [ensureFolder] may be injected alone; the connection still
 /// opens for the writes and the injected ensurer is used for both folders.
 ///
+/// [only] narrows the pass to a subset of the staged shots (the review
+/// page uploads the READY ones and leaves PENDING/FAILED entries staged) —
+/// null means all of [CaptureSession.shots]. Outcomes, progress totals and
+/// cleanup consider only the shots actually attempted.
+///
 /// Folder ensures: the share path always (best-effort — it must already
 /// exist, and "already exists" errors are expected), plus
 /// `sharePath/orderNumber` when order folders are on. A write failure keeps
@@ -68,10 +73,12 @@ String uploadTargetPath({
 /// failure is likewise a failed outcome, not a crash. [onProgress] fires
 /// after each processed shot with the running count. A session whose shots
 /// all uploaded has its temp dir reclaimed via
-/// [CaptureSession.cleanupIfEmpty].
+/// [CaptureSession.cleanupIfEmpty] (a session still holding staged entries
+/// — e.g. a flagged failed conversion — keeps its dir).
 Future<UploadSummary> uploadSession(
   CaptureSession session,
   AppSettings settings, {
+  List<Shot>? only,
   ShotWriter? writeShot,
   FolderEnsurer? ensureFolder,
   void Function(int done, int total)? onProgress,
@@ -82,6 +89,7 @@ Future<UploadSummary> uploadSession(
     return _runAll(
       session,
       settings,
+      only: only,
       writer: writeShot,
       ensurer: ensureFolder,
       onProgress: onProgress,
@@ -111,6 +119,7 @@ Future<UploadSummary> uploadSession(
     return await _runAll(
       session,
       settings,
+      only: only,
       writer: defaultWriter,
       ensurer: ensureFolder ?? defaultEnsure,
       onProgress: onProgress,
@@ -126,6 +135,7 @@ Future<UploadSummary> uploadSession(
 Future<UploadSummary> _runAll(
   CaptureSession session,
   AppSettings settings, {
+  required List<Shot>? only,
   required ShotWriter writer,
   required FolderEnsurer? ensurer,
   void Function(int done, int total)? onProgress,
@@ -148,7 +158,9 @@ Future<UploadSummary> _runAll(
   }
 
   final outcomes = <UploadOutcome>[];
-  final shots = session.shots;
+  // [only] is a caller-filtered subset of the staged list (the page passes
+  // the READY entries verbatim); null → everything staged.
+  final shots = only ?? session.shots;
   for (final shot in shots) {
     UploadOutcome outcome;
     try {

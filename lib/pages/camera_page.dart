@@ -17,12 +17,16 @@ import 'preview_page.dart';
 /// the picker is in flight — there is no idle screen to land on, nothing to
 /// tap, no way to get stuck here. Every outcome leaves the page:
 ///
-///  - pick succeeds → process → admit into the session → [PreviewPage];
+///  - pick succeeds → the shot is admitted PENDING (name and index
+///    reserved NOW via [admitPicked]) and [PreviewPage] opens while the
+///    conversion still runs in the background — the next photo can be
+///    taken immediately; a conversion that later fails is flagged at
+///    review ([ShotStatus.failed]), it never abandons the flow;
 ///  - pick returns null (user backed out of the system camera) → cancel:
 ///    back to a fresh [PreviewPage] when shots are already staged (Retake /
 ///    Add photo must never discard the batch), otherwise pop the capture
 ///    flow to the first route (the Scan tab);
-///  - pick or processing throws → SnackBar + that same two-way exit, so no
+///  - the picker itself throws → SnackBar + that same two-way exit, so no
 ///    dead screen is ever parked under the user. Retrying means starting
 ///    the flow again (scan, or Add photo from the preview).
 ///
@@ -40,8 +44,9 @@ class CameraPage extends StatefulWidget {
   final CaptureSession session;
   final ValueNotifier<AppSettings> settingsNotifier;
 
-  /// Injectable admission — tests pass a fake (copying bytes) or a thrower
-  /// (exercising the failure guard). Defaults to production.
+  /// Injectable admission — tests pass a fake (copying bytes), a thrower
+  /// (flagging the entry failed), or a never-settling one (holding the
+  /// entry pending). Defaults to production.
   final ImageProcessor processor;
 
   @override
@@ -86,21 +91,17 @@ class _CameraPageState extends State<CameraPage> {
         return;
       }
 
-      // Admission: process FIRST, add only on success. A throw here (codec
-      // failure, unreadable pick) must leave the session exactly as it was
-      // — no half-admitted shot, numbering unchanged.
-      try {
-        final shot = await widget.processor.process(
-          pickedPath: photo.path,
-          prefs: prefs,
-          session: widget.session,
-        );
-        widget.session.add(shot);
-      } catch (_) {
-        if (!mounted) return;
-        await _abandon('Could not process photo');
-        return;
-      }
+      // Admission without waiting on the conversion: the name and index
+      // are reserved NOW, the PENDING entry is staged, and the processing
+      // runs behind the navigation — the next photo can be taken at once.
+      // A conversion that fails never abandons the flow: its entry is
+      // flagged failed at review for a retake (see [admitPicked]).
+      admitPicked(
+        pickedPath: photo.path,
+        prefs: prefs,
+        session: widget.session,
+        processor: widget.processor,
+      );
 
       if (!mounted) return;
       await Navigator.of(context).pushReplacement(

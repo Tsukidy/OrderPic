@@ -288,5 +288,96 @@ void main() {
       expect(summary.allOk, isTrue);
       expect(rec.writes, hasLength(1));
     });
+
+    group('only (subset pass — the review page uploads READY shots)', () {
+      test('uploads exactly the subset, keeps the rest staged, progress '
+          'counts the subset', () async {
+        final session = await _session('100438', [
+          '100438_20260908_101112_1.jpg',
+          '100438_20260908_101113_2.jpg',
+          '100438_20260908_101114_3.jpg',
+        ]);
+        final shots = session.shots.toList();
+        final rec = _Recorder();
+
+        // The review page's shape: every READY entry, verbatim, in order —
+        // here the first two (a conversion-failed third stays behind).
+        final summary = await uploadSession(
+          session,
+          _settings(folders: true),
+          only: [shots[0], shots[1]],
+          writeShot: rec.writeShot,
+          ensureFolder: rec.ensureFolder,
+          onProgress: rec.onProgress,
+        );
+
+        expect(rec.writes, hasLength(2));
+        expect(
+          rec.writes[0].path,
+          '/zdrive/InvoiceData/100438/100438_20260908_101112_1.jpg',
+        );
+        expect(
+          rec.writes[1].path,
+          '/zdrive/InvoiceData/100438/100438_20260908_101113_2.jpg',
+        );
+        expect(File(shots[0].localPath).existsSync(), isFalse);
+        expect(File(shots[1].localPath).existsSync(), isFalse);
+        expect(File(shots[2].localPath).existsSync(), isTrue,
+            reason: 'a shot outside the subset is never touched');
+        expect(session.shots, [shots[2]],
+            reason: 'the skipped entry stays staged');
+        expect(summary.allOk, isTrue);
+        expect(summary.uploadedCount, 2);
+        expect(summary.remaining, isEmpty);
+        expect(rec.progress, [
+          (done: 1, total: 2),
+          (done: 2, total: 2),
+        ]);
+        expect(session.dir.existsSync(), isTrue,
+            reason: 'staged entries remain — no cleanup');
+      });
+
+      test('an empty subset uploads nothing and leaves the session intact',
+          () async {
+        final session = await _session('100438', ['a.jpg']);
+        final rec = _Recorder();
+
+        final summary = await uploadSession(
+          session,
+          _settings(folders: false),
+          only: const [],
+          writeShot: rec.writeShot,
+          ensureFolder: rec.ensureFolder,
+        );
+
+        expect(rec.writes, isEmpty);
+        expect(summary.outcomes, isEmpty);
+        expect(summary.allOk, isTrue, reason: 'nothing attempted, nothing failed');
+        expect(session.shots, hasLength(1));
+        expect(session.dir.existsSync(), isTrue);
+      });
+
+      test('a subset with a failing write keeps that shot staged as '
+          'remaining', () async {
+        final session = await _session('100438', ['a.jpg', 'b.jpg']);
+        final shots = session.shots.toList();
+        final rec = _Recorder();
+
+        final summary = await uploadSession(
+          session,
+          _settings(folders: false),
+          only: shots,
+          writeShot: (path, bytes) async {
+            throw StateError('SMB write failed');
+          },
+          ensureFolder: rec.ensureFolder,
+          onProgress: rec.onProgress,
+        );
+
+        expect(summary.allOk, isFalse);
+        expect(summary.remaining, shots);
+        expect(session.shots, shots);
+      });
+    });
   });
 }
