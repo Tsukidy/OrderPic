@@ -33,7 +33,7 @@
 ## 5. History drill-down
 
 - [x] 5.1 Root listing: directory tiles via `SmbFile.isDirectory()` — `Icons.folder` leading, small grey "Folder" label, name-descending, placed before loose images (newest-first as today)
-- [ ] 5.2 Order folder page: lists that folder's images (readable time title, filename subtitle, size trailing), reuses `ImageViewerPage` unchanged, pull-to-refresh at both levels; widget tests for tiles + drill-down
+- [x] 5.2 Order folder page: lists that folder's images (readable time title, filename subtitle, size trailing), reuses `ImageViewerPage` unchanged, pull-to-refresh at both levels; widget tests for tiles + drill-down
 
 ## 6. Verification & docs
 
