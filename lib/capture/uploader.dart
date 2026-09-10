@@ -305,17 +305,23 @@ Future<UploadSummary> _uploadWithAutoRetry(
     ShotWriter? writer;
     FolderEnsurer? roundEnsurer;
     Future<void> Function()? close;
-    var dialOk = injectedWriter != null; // injected writers hold no connection
+    // Injected writers hold no connection, so their round's "dial" is a
+    // no-op that always comes up — dialOk starts true there. Production
+    // starts false and flips only after THIS round's dial succeeds, so the
+    // gate sees each round's real connectivity.
+    var dialOk = injectedWriter != null;
 
     if (injectedWriter != null) {
       writer = injectedWriter;
       roundEnsurer = injectedEnsurer;
     } else {
+      dialOk = false;
       try {
         final conn = await dial!();
         writer = conn.writer;
         roundEnsurer = injectedEnsurer ?? conn.ensurer;
         close = conn.close;
+        dialOk = true;
       } catch (e) {
         // The initial dial failing is today's behavior: the whole call
         // throws (SmbNotConfiguredException et al). A failed REDIAL merely
@@ -372,6 +378,7 @@ Future<UploadSummary> _uploadWithAutoRetry(
           }
           results[i] = outcome;
           if (outcome.ok) {
+            roundProgress = true;
             counted[i] = true;
             settled++;
             fire();
@@ -409,6 +416,13 @@ Future<UploadSummary> _uploadWithAutoRetry(
     // (non-timeout failures never trigger a redial); the first retry always
     // runs, then a round must have uploaded something OR at least dialed to
     // earn another — bounded by [maxAutoRetries] rounds in total.
+    //
+    // Seam note: the roundProgress/dialOk arms are PRODUCTION facts — the
+    // injected writer path cannot observe them (its dial is a no-op that
+    // always comes up, so dialOk is true there by definition). The gate's
+    // real-path behavior (dead network stops the loop after a failed dial;
+    // a round that dialed but uploaded nothing still earns one more) is
+    // device-verified against the 6.1 finding, not seam-tested.
     var remaining = false;
     for (final r in results) {
       if (r == null || !r.ok) {

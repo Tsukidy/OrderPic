@@ -615,6 +615,60 @@ void main() {
         expect(rec.progress.last, (done: 3, total: 3));
       });
 
+      test('BOTH auto-retry rounds run under maxAutoRetries=2 when every '
+          'round makes progress: a connection that dies under every second '
+          'shot still finishes allOk', () async {
+        final session = await _session('100438', [
+          '100438_20260908_101112_1.jpg',
+          '100438_20260908_101113_2.jpg',
+          '100438_20260908_101114_3.jpg',
+        ]);
+        final rec = _Recorder();
+
+        // Every EVEN call stalls out (the connection dies under it); every
+        // odd call succeeds. Round 1 uploads shot 1 and dies under shot 2;
+        // retry 1 uploads shot 2 and dies under shot 3; retry 2 uploads
+        // shot 3. Each round's progress is what keeps the gate open for the
+        // next one — with a bound of 1 the batch would stop at 4 calls.
+        final hang = Completer<void>();
+        var calls = 0;
+        Future<void> writer(String remotePath, Uint8List bytes) {
+          calls += 1;
+          if (calls.isEven) return hang.future;
+          return rec.writeShot(remotePath, bytes);
+        }
+
+        final summary = await uploadSession(
+          session,
+          _settings(folders: true),
+          writeShot: writer,
+          ensureFolder: rec.ensureFolder,
+          onProgress: rec.onProgress,
+          writeTimeout: const Duration(milliseconds: 100),
+          maxAutoRetries: 2,
+          retryDelays: const [
+            Duration(milliseconds: 10),
+            Duration(milliseconds: 10),
+          ],
+        );
+
+        expect(calls, 5,
+            reason: 'three rounds — initial + BOTH retries — pinning the '
+                'round-counting machinery: round 2 must be reachable while '
+                'retryCount < maxAutoRetries');
+        expect(rec.writes, hasLength(3));
+        expect(summary.allOk, isTrue);
+        expect(summary.uploadedCount, 3);
+        expect(summary.remaining, isEmpty);
+        expect(rec.progress, [
+          (done: 1, total: 3),
+          (done: 2, total: 3),
+          (done: 3, total: 3),
+        ]);
+        expect(session.shots, isEmpty);
+        expect(session.dir.existsSync(), isFalse);
+      });
+
       test('timeout fires per shot, not per batch — each of several slow '
           'shots gets its own budget', () async {
         final session = await _session('100438', ['a.jpg', 'b.jpg', 'c.jpg']);
