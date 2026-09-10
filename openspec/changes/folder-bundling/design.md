@@ -189,6 +189,20 @@ side consumes the share contents.
   longer leak unhandled zone errors (`_bounded` awaits with a done-guard;
   `Future.timeout` drops late source errors into the zone — the device
   log's `Bad state: StreamSink is closed` spam).
+- **Addendum (6.11, same re-pass)**: against real Windows shares the
+  retry under a held lock does not fast-fail — the server BLOCKS the
+  create behind the dead session's handle, so the retry burns its own
+  timeout and the "two timeouts = dead network" rule aborted passes the
+  dial had just proven healthy. Refinement: a retry that stalls on a
+  FRESH connection (dial succeeded, same file) is the ghost-lock
+  signature — the shot is marked server-held with the lock-window
+  message, exempt from the rescue and the cleanup probe (both would hang
+  the same way), does not count toward the abort, and the batch
+  continues; the dead-network abort now requires a timeout on a NEW
+  shot. Retry writes are bounded at 15s (a healthy LAN retry answers in
+  a fraction of that), the exists/delete probes carry the write bound,
+  and raw sharing-violation text ("being used by another process")
+  always carries the lock-window guidance.
 - **Rationale**: SMB has no multi-file transaction, so isolation granularity
   is the file; an operator should never re-shoot because one write failed.
 - **Alternatives considered**: all-or-nothing semantics (impossible without

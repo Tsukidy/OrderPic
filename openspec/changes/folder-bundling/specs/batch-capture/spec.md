@@ -129,12 +129,19 @@ rather than surfacing the raw refusal.
 Bounds: two write timeouts with no successful write between them, or a
 redial that cannot come up, MUST abort the pass — every unattempted shot
 is skip-marked immediately rather than each waiting out its own timeout.
-The manual Retry action remains: failed, timed-out, and skipped shots
-stay staged locally and re-upload with a fresh connection. If any shot
-fails, the un-uploaded shots MUST remain in the session. After every
-shot succeeds, the flow MUST show a completion summary with a Scan next
-action and a More-for-this-order action that starts a fresh empty
-session for the same order number.
+A ghost-locked shot does not count toward that bound: when a shot's
+retry write stalls on a FRESH connection (the dial succeeded — the
+network is fine; the server is blocking the write behind the dead
+session's handle), the shot MUST be marked server-held with guidance to
+press Retry after the lock window, MUST NOT be re-attempted or probed
+again during the call (no attempt inside the window can win), and the
+remaining shots MUST continue unaffected. The manual Retry action
+remains: failed, timed-out, and skipped shots stay staged locally and
+re-upload with a fresh connection. If any shot fails, the un-uploaded
+shots MUST remain in the session. After every shot succeeds, the flow
+MUST show a completion summary with a Scan next action and a
+More-for-this-order action that starts a fresh empty session for the
+same order number.
 
 #### Scenario: Successful batch uploads and cleans up
 
@@ -162,6 +169,14 @@ session for the same order number.
 - **THEN** the partial file is deleted from the share, the shot stays
   staged locally, and its error states the partial copy was removed (or
   that the server briefly still holds it, when the delete is refused)
+
+#### Scenario: A retry stalled on a fresh connection is a held file, not a dead network
+
+- **WHEN** a shot times out, the redial succeeds, and the retry write on
+  the fresh connection also stalls
+- **THEN** the shot fails with a message naming the server's held-file
+  lock window (press Retry after it clears), is not re-attempted during
+  the call, and the remaining shots upload normally
 
 #### Scenario: A dead network aborts without serial timeouts
 
