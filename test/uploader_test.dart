@@ -7,26 +7,81 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:orderpic/capture/session.dart';
 import 'package:orderpic/capture/uploader.dart';
 import 'package:orderpic/settings/app_settings.dart';
-import 'package:orderpic/smb/smb.dart';
 
-/// Records every writeShot / ensureFolder / onProgress call. Injecting both
-/// fakes must bypass the SMB connection entirely (asserted via the empty
-/// username, which makes any [connect] attempt throw immediately).
-class _Recorder {
-  final writes = <({String path, List<int> bytes})>[];
-  final ensured = <String>[];
-  final progress = <({int done, int total})>[];
+/// Signifier for "this write never completes" in a [_ScriptedConn]'s plan.
+class _Hang {
+  const _Hang();
+}
 
-  Future<void> writeShot(String remotePath, Uint8List bytes) async {
-    writes.add((path: remotePath, bytes: bytes.toList()));
+const hang = _Hang();
+
+/// One fake connection recording every operation into the shared [log] as
+/// `name op argument`. Write behavior is scripted per call in write-order:
+/// `null` (or past the plan's end) → success, [hang] → never completes,
+/// anything else → thrown. Delete can be made to fail (the server refusing
+/// to release a locked partial file); exists answers per-path.
+class _ScriptedConn implements UploadConnection {
+  _ScriptedConn(this.name, this.log);
+
+  final String name;
+  final List<String> log;
+  final List<Object?> writePlan = [];
+  final Map<String, bool> existsAnswers = {};
+  Object? deleteError;
+  int writes = 0;
+
+  @override
+  Future<void> write(String remotePath, Uint8List bytes) {
+    log.add('$name write $remotePath');
+    final plan = writes < writePlan.length ? writePlan[writes] : null;
+    writes++;
+    if (plan is _Hang) return Completer<void>().future;
+    if (plan != null) throw plan;
+    return Future.value();
   }
 
-  Future<void> ensureFolder(String path) async {
-    ensured.add(path);
+  @override
+  Future<void> ensureFolder(String path) {
+    log.add('$name ensure $path');
+    return Future.value();
   }
 
-  void onProgress(int done, int total) {
-    progress.add((done: done, total: total));
+  @override
+  Future<bool> exists(String remotePath) {
+    log.add('$name exists $remotePath');
+    return Future.value(existsAnswers[remotePath] ?? false);
+  }
+
+  @override
+  Future<void> delete(String remotePath) {
+    log.add('$name delete $remotePath');
+    if (deleteError != null) throw deleteError!;
+    return Future.value();
+  }
+
+  @override
+  Future<void> close() {
+    log.add('$name close');
+    return Future.value();
+  }
+}
+
+/// Hands out scripted connections from the `dial` seam and records the
+/// sequence. `failDialsFrom` makes dial N and every later one fail.
+class _Dials {
+  final log = <String>[];
+  final conns = <_ScriptedConn>[];
+  int count = 0;
+  int? failDialsFrom;
+
+  Future<UploadConnection> call() {
+    count++;
+    if (failDialsFrom != null && count >= failDialsFrom!) {
+      throw StateError('network unreachable');
+    }
+    final c = _ScriptedConn('c$count', log);
+    conns.add(c);
+    return Future.value(c);
   }
 }
 
@@ -46,19 +101,21 @@ Future<CaptureSession> _session(
   return s;
 }
 
-ConnectionSettings _conn({required String sharePath}) =>
-    const ConnectionSettings(
-      host: '192.0.2.1',
-      sharePath: '/zdrive/InvoiceData',
-      domain: '',
-      username: '', // empty on purpose: any real connect() throws
-      password: '',
-    ).copyWith(sharePath: sharePath);
+const ConnectionSettings _conn = ConnectionSettings(
+  host: '192.0.2.1',
+  sharePath: '/zdrive/InvoiceData',
+  domain: '',
+  username: '', // empty on purpose: any real dial would refuse
+  password: '',
+);
 
 AppSettings _settings({required bool folders}) => AppSettings(
-  connection: _conn(sharePath: '/zdrive/InvoiceData'),
+  connection: _conn,
   upload: UploadPrefs(useOrderFolders: folders),
 );
+
+const _fast = Duration(milliseconds: 50);
+const _tick = Duration(milliseconds: 1);
 
 void main() {
   tearDown(() {
@@ -73,7 +130,13 @@ void main() {
   group('uploadTargetPath', () {
     test('flat: sharePath/fileName (sharePath used verbatim)', () {
       final path = uploadTargetPath(
-        c: _conn(sharePath: '/zdrive/InvoiceData/Sub'),
+        c: const ConnectionSettings(
+          host: 'h',
+          sharePath: '/zdrive/InvoiceData/Sub',
+          domain: '',
+          username: 'u',
+          password: 'p',
+        ),
         u: const UploadPrefs(useOrderFolders: false),
         orderNumber: '100438',
         fileName: '100438_20260908_101112_1.jpg',
@@ -83,7 +146,13 @@ void main() {
 
     test('folders on: sharePath/orderNumber/fileName', () {
       final path = uploadTargetPath(
-        c: _conn(sharePath: '/zdrive/InvoiceData/Sub'),
+        c: const ConnectionSettings(
+          host: 'h',
+          sharePath: '/zdrive/InvoiceData/Sub',
+          domain: '',
+          username: 'u',
+          password: 'p',
+        ),
         u: const UploadPrefs(useOrderFolders: true),
         orderNumber: '100438',
         fileName: '100438_20260908_101112_1.jpg',
@@ -95,7 +164,7 @@ void main() {
     });
   });
 
-  group('uploadSession (injected fakes)', () {
+  group('uploadSession (dialed fake connections)', () {
     test('two shots → two writes to right paths, locals deleted, allOk, '
         'progress (1,2) then (2,2), session dir cleaned up', () async {
       final session = await _session('100438', [
@@ -104,28 +173,27 @@ void main() {
       ]);
       final shot1 = session.shots[0];
       final shot2 = session.shots[1];
-      final rec = _Recorder();
+      final dials = _Dials();
+      final progress = <({int done, int total})>[];
 
       final summary = await uploadSession(
         session,
         _settings(folders: true),
-        writeShot: rec.writeShot,
-        ensureFolder: rec.ensureFolder,
-        onProgress: rec.onProgress,
+        dial: dials.call,
+        onProgress: (done, total) => progress.add((done: done, total: total)),
       );
 
-      expect(rec.writes, hasLength(2));
+      expect(dials.count, 1, reason: 'a healthy pass never redials');
       expect(
-        rec.writes[0].path,
-        '/zdrive/InvoiceData/100438/100438_20260908_101112_1.jpg',
+        dials.log,
+        [
+          'c1 ensure /zdrive/InvoiceData',
+          'c1 ensure /zdrive/InvoiceData/100438',
+          'c1 write /zdrive/InvoiceData/100438/100438_20260908_101112_1.jpg',
+          'c1 write /zdrive/InvoiceData/100438/100438_20260908_101113_2.jpg',
+          'c1 close',
+        ],
       );
-      expect(
-        rec.writes[1].path,
-        '/zdrive/InvoiceData/100438/100438_20260908_101113_2.jpg',
-      );
-      expect(rec.writes[0].bytes, [0]);
-      expect(rec.writes[1].bytes, [1]);
-
       expect(File(shot1.localPath).existsSync(), isFalse);
       expect(File(shot2.localPath).existsSync(), isFalse);
       expect(session.shots, isEmpty);
@@ -133,8 +201,7 @@ void main() {
       expect(summary.uploadedCount, 2);
       expect(summary.remaining, isEmpty);
       expect(summary.outcomes.every((o) => o.error == null), isTrue);
-
-      expect(rec.progress, [
+      expect(progress, [
         (done: 1, total: 2),
         (done: 2, total: 2),
       ]);
@@ -142,98 +209,34 @@ void main() {
           reason: 'cleanupIfEmpty runs after the loop');
     });
 
-    test('writer throws on 2nd of 3: shot1 ok+deleted, shots 2-3 kept and '
-        'are exactly remaining, allOk false', () async {
-      final session = await _session('100438', [
-        '100438_20260908_101112_1.jpg',
-        '100438_20260908_101113_2.jpg',
-        '100438_20260908_101114_3.jpg',
-      ]);
-      final shots = session.shots.toList();
-      final rec = _Recorder();
+    test('folders off → only the share path is ensured', () async {
+      final session = await _session('100438', ['a.jpg']);
+      final dials = _Dials();
 
-      // First write succeeds; everything after fails (share drops mid-run).
-      var calls = 0;
-      Future<void> writer(String remotePath, Uint8List bytes) async {
-        calls += 1;
-        if (calls > 1) {
-          throw StateError('SMB write failed');
-        }
-        return rec.writeShot(remotePath, bytes);
-      }
+      await uploadSession(session, _settings(folders: false), dial: dials.call);
 
+      expect(
+        dials.log.where((e) => e.contains('ensure')).toList(),
+        ['c1 ensure /zdrive/InvoiceData'],
+      );
+    });
+
+    test('a throwing ensureFolder is swallowed (best-effort, share must '
+        'pre-exist)', () async {
+      final session = await _session('100438', ['a.jpg']);
+      final dials = _Dials();
+
+      // The default _ScriptedConn.ensureFolder cannot throw; script a
+      // throwing one by subclassing the seam inline.
+      final throwing = _ThrowingEnsureConn('c1', dials.log);
       final summary = await uploadSession(
         session,
         _settings(folders: true),
-        writeShot: writer,
-        ensureFolder: rec.ensureFolder,
-        onProgress: rec.onProgress,
-      );
-
-      expect(File(shots[0].localPath).existsSync(), isFalse,
-          reason: 'shot 1 succeeded → local deleted');
-      expect(File(shots[1].localPath).existsSync(), isTrue);
-      expect(File(shots[2].localPath).existsSync(), isTrue);
-
-      expect(summary.allOk, isFalse);
-      expect(summary.uploadedCount, 1);
-      expect(summary.remaining, [shots[1], shots[2]]);
-      expect(summary.outcomes[0].ok, isTrue);
-      expect(summary.outcomes[1].ok, isFalse);
-      expect(summary.outcomes[1].error, contains('SMB write failed'));
-      expect(summary.outcomes[2].ok, isFalse);
-
-      expect(rec.progress, [
-        (done: 1, total: 3),
-        (done: 2, total: 3),
-        (done: 3, total: 3),
-      ]);
-      expect(session.dir.existsSync(), isTrue,
-          reason: 'shots remain staged — no cleanup');
-    });
-
-    test('ensureFolder: sharePath + sharePath/order when folders on',
-        () async {
-      final session = await _session('100438', ['a.jpg']);
-      final rec = _Recorder();
-
-      await uploadSession(
-        session,
-        _settings(folders: true),
-        writeShot: rec.writeShot,
-        ensureFolder: rec.ensureFolder,
-      );
-
-      expect(rec.ensured, ['/zdrive/InvoiceData', '/zdrive/InvoiceData/100438']);
-    });
-
-    test('ensureFolder: only sharePath when folders off', () async {
-      final session = await _session('100438', ['a.jpg']);
-      final rec = _Recorder();
-
-      await uploadSession(
-        session,
-        _settings(folders: false),
-        writeShot: rec.writeShot,
-        ensureFolder: rec.ensureFolder,
-      );
-
-      expect(rec.ensured, ['/zdrive/InvoiceData']);
-    });
-
-    test('injected fakes never open a connection (empty username would '
-        'throw SmbNotConfiguredException if they did)', () async {
-      final session = await _session('100438', ['a.jpg']);
-      final rec = _Recorder();
-
-      final summary = await uploadSession(
-        session,
-        _settings(folders: false),
-        writeShot: rec.writeShot,
-        ensureFolder: rec.ensureFolder,
+        dial: () async => throwing,
       );
 
       expect(summary.allOk, isTrue);
+      expect(throwing.writes, 1);
     });
 
     test('unreadable local file → failed outcome with error, other shots '
@@ -245,14 +248,14 @@ void main() {
         fileName: '100438_20260908_101113_2.jpg',
       );
       session.add(missing);
-      final rec = _Recorder();
+      final dials = _Dials();
+      final progress = <({int done, int total})>[];
 
       final summary = await uploadSession(
         session,
         _settings(folders: false),
-        writeShot: rec.writeShot,
-        ensureFolder: rec.ensureFolder,
-        onProgress: rec.onProgress,
+        dial: dials.call,
+        onProgress: (done, total) => progress.add((done: done, total: total)),
       );
 
       expect(summary.allOk, isFalse);
@@ -263,31 +266,11 @@ void main() {
       expect(summary.outcomes[1].ok, isFalse);
       expect(summary.outcomes[1].error, isNotNull);
       expect(File(good.localPath).existsSync(), isFalse);
-      expect(rec.writes, hasLength(1));
-      expect(rec.progress, [
+      expect(dials.conns.single.writes, 1);
+      expect(progress, [
         (done: 1, total: 2),
         (done: 2, total: 2),
       ]);
-    });
-
-    test('throwing ensureFolder is swallowed (best-effort, share must '
-        'pre-exist)', () async {
-      final session = await _session('100438', ['a.jpg']);
-      final rec = _Recorder();
-
-      Future<void> failingEnsurer(String path) async {
-        throw StateError('already exists');
-      }
-
-      final summary = await uploadSession(
-        session,
-        _settings(folders: true),
-        writeShot: rec.writeShot,
-        ensureFolder: failingEnsurer,
-      );
-
-      expect(summary.allOk, isTrue);
-      expect(rec.writes, hasLength(1));
     });
 
     group('only (subset pass — the review page uploads READY shots)', () {
@@ -299,27 +282,24 @@ void main() {
           '100438_20260908_101114_3.jpg',
         ]);
         final shots = session.shots.toList();
-        final rec = _Recorder();
+        final dials = _Dials();
+        final progress = <({int done, int total})>[];
 
-        // The review page's shape: every READY entry, verbatim, in order —
-        // here the first two (a conversion-failed third stays behind).
         final summary = await uploadSession(
           session,
           _settings(folders: true),
           only: [shots[0], shots[1]],
-          writeShot: rec.writeShot,
-          ensureFolder: rec.ensureFolder,
-          onProgress: rec.onProgress,
+          dial: dials.call,
+          onProgress: (done, total) => progress.add((done: done, total: total)),
         );
 
-        expect(rec.writes, hasLength(2));
+        expect(dials.conns.single.writes, 2);
         expect(
-          rec.writes[0].path,
-          '/zdrive/InvoiceData/100438/100438_20260908_101112_1.jpg',
-        );
-        expect(
-          rec.writes[1].path,
-          '/zdrive/InvoiceData/100438/100438_20260908_101113_2.jpg',
+          dials.log.where((e) => e.contains('write')).toList(),
+          [
+            'c1 write /zdrive/InvoiceData/100438/100438_20260908_101112_1.jpg',
+            'c1 write /zdrive/InvoiceData/100438/100438_20260908_101113_2.jpg',
+          ],
         );
         expect(File(shots[0].localPath).existsSync(), isFalse);
         expect(File(shots[1].localPath).existsSync(), isFalse);
@@ -330,7 +310,7 @@ void main() {
         expect(summary.allOk, isTrue);
         expect(summary.uploadedCount, 2);
         expect(summary.remaining, isEmpty);
-        expect(rec.progress, [
+        expect(progress, [
           (done: 1, total: 2),
           (done: 2, total: 2),
         ]);
@@ -341,384 +321,432 @@ void main() {
       test('an empty subset uploads nothing and leaves the session intact',
           () async {
         final session = await _session('100438', ['a.jpg']);
-        final rec = _Recorder();
+        final dials = _Dials();
 
         final summary = await uploadSession(
           session,
           _settings(folders: false),
           only: const [],
-          writeShot: rec.writeShot,
-          ensureFolder: rec.ensureFolder,
+          dial: dials.call,
         );
 
-        expect(rec.writes, isEmpty);
+        expect(dials.conns, isEmpty, reason: 'nothing to upload — never dials');
         expect(summary.outcomes, isEmpty);
-        expect(summary.allOk, isTrue, reason: 'nothing attempted, nothing failed');
+        expect(summary.allOk, isTrue,
+            reason: 'nothing attempted, nothing failed');
         expect(session.shots, hasLength(1));
         expect(session.dir.existsSync(), isTrue);
       });
-
-      test('a subset with a failing write keeps that shot staged as '
-          'remaining', () async {
-        final session = await _session('100438', ['a.jpg', 'b.jpg']);
-        final shots = session.shots.toList();
-        final rec = _Recorder();
-
-        final summary = await uploadSession(
-          session,
-          _settings(folders: false),
-          only: shots,
-          writeShot: (path, bytes) async {
-            throw StateError('SMB write failed');
-          },
-          ensureFolder: rec.ensureFolder,
-          onProgress: rec.onProgress,
-        );
-
-        expect(summary.allOk, isFalse);
-        expect(summary.remaining, shots);
-        expect(session.shots, shots);
-      });
     });
+  });
 
-    group('per-shot write timeout → dead connection (fail-fast + auto-retry)', () {
-      test('default timeout is 30s per shot', () {
-        expect(smbWriteTimeout, const Duration(seconds: 30));
-      });
+  group('in-place retry (a failed shot is retried before the batch moves on)',
+      () {
+      test('transient write error: the SAME shot is retried on the same '
+          'connection before the next shot runs', () async {
+        final session = await _session('100438', ['a.jpg', 'b.jpg']);
+        final dials = _Dials();
+        // First write attempt fails; the retry succeeds.
+        dials.conns.add(_ScriptedConn('c1', dials.log));
+        dials.conns.single.writePlan.add(StateError('server busy'));
 
-      test('progress gate: shot 1 uploads, shot 2 hangs → shots skip at '
-          'once on the dead connection, the auto-retry redial finishes the '
-          'batch allOk', () async {
-        final session = await _session('100438', [
-          '100438_20260908_101112_1.jpg',
-          '100438_20260908_101113_2.jpg',
-          '100438_20260908_101114_3.jpg',
-        ]);
-        final rec = _Recorder();
-
-        // Call 2 (round 1's second shot) never completes — the connection
-        // dies under it. The writer is healthy again by the retry round.
-        final hang = Completer<void>();
-        var calls = 0;
-        Future<void> writer(String remotePath, Uint8List bytes) {
-          calls += 1;
-          if (calls == 2) return hang.future;
-          return rec.writeShot(remotePath, bytes);
-        }
-
+        Future<UploadConnection> dial() async => dials.conns.single;
         final summary = await uploadSession(
           session,
-          _settings(folders: true),
-          writeShot: writer,
-          ensureFolder: rec.ensureFolder,
-          onProgress: rec.onProgress,
-          writeTimeout: const Duration(milliseconds: 100),
-          retryDelays: const [Duration(milliseconds: 10)],
+          _settings(folders: false),
+          dial: dial,
+          redialDelay: _tick,
         );
 
-        // Round 1: shot 1 uploaded, shot 2 timed out, shot 3 skipped
-        // WITHOUT being attempted. Round 2 (fresh redial): shots 2-3.
-        expect(calls, 4,
-            reason: 'shot 3 must be skipped on the dead connection, not '
-                'attempted (a continuing batch would stop at 3 calls)');
-        expect(rec.writes, hasLength(3));
-        expect(summary.allOk, isTrue);
-        expect(summary.uploadedCount, 3);
-        expect(summary.remaining, isEmpty);
-        expect(rec.progress, [
-          (done: 1, total: 3),
-          (done: 2, total: 3),
-          (done: 3, total: 3),
-        ], reason: 'monotonic across rounds, ending at (3,3)');
-        expect(session.shots, isEmpty);
-        expect(session.dir.existsSync(), isFalse,
-            reason: 'everything uploaded → session dir reclaimed');
-        // The hung write is abandoned, not awaited to completion.
-        expect(hang.isCompleted, isFalse);
-      });
-
-      test('dead connection then healthy: after the backoff the remaining '
-          'shots resume on the redial and ALL upload (allOk, progress '
-          'reaches (3,3))', () async {
-        final session = await _session('100438', [
-          '100438_20260908_101112_1.jpg',
-          '100438_20260908_101113_2.jpg',
-          '100438_20260908_101114_3.jpg',
-        ]);
-        final rec = _Recorder();
-
-        // Only the FIRST write hangs — the connection is dead right at the
-        // start and the share is back by the time the uploader redials.
-        final hang = Completer<void>();
-        var calls = 0;
-        Future<void> writer(String remotePath, Uint8List bytes) {
-          calls += 1;
-          if (calls == 1) return hang.future;
-          return rec.writeShot(remotePath, bytes);
-        }
-
-        final summary = await uploadSession(
-          session,
-          _settings(folders: true),
-          writeShot: writer,
-          ensureFolder: rec.ensureFolder,
-          onProgress: rec.onProgress,
-          writeTimeout: const Duration(milliseconds: 100),
-          retryDelays: const [Duration(milliseconds: 10)],
-        );
-
-        expect(calls, 4,
-            reason: 'round 1 attempted only shot 1 (shots 2-3 were skipped '
-                'on the dead connection); the redial re-ran all three');
         expect(
-          rec.writes.map((w) => w.path).toList(),
-          [
-            '/zdrive/InvoiceData/100438/100438_20260908_101112_1.jpg',
-            '/zdrive/InvoiceData/100438/100438_20260908_101113_2.jpg',
-            '/zdrive/InvoiceData/100438/100438_20260908_101114_3.jpg',
-          ],
-          reason: 'the retry round re-runs every remaining shot, in order',
+          dials.log.where((e) => e.contains('write')).toList(),
+          ['c1 write /zdrive/InvoiceData/a.jpg',
+           'c1 write /zdrive/InvoiceData/a.jpg',
+           'c1 write /zdrive/InvoiceData/b.jpg'],
+          reason: 'shot A is retried BEFORE the batch moves to shot B',
         );
         expect(summary.allOk, isTrue);
-        expect(summary.uploadedCount, 3);
-        expect(summary.remaining, isEmpty);
-        expect(rec.progress.last, (done: 3, total: 3));
         expect(session.shots, isEmpty);
-        expect(session.dir.existsSync(), isFalse);
       });
 
-      test('connection never recovers: each round attempts only shot 1 and '
-          'skips 2-3 instantly; bounded rounds then stop (1 timeout + 2 '
-          'skipped in the summary, manual Retry still finishes the batch)',
-          () async {
-        final session = await _session('100438', [
-          '100438_20260908_101112_1.jpg',
-          '100438_20260908_101113_2.jpg',
-          '100438_20260908_101114_3.jpg',
-        ]);
-        final shots = session.shots.toList();
-        final rec = _Recorder();
-
-        // EVERY write hangs — the share stays unreachable.
-        var calls = 0;
-        Future<void> writer(String remotePath, Uint8List bytes) async {
-          calls += 1;
-          await Completer<void>().future;
-        }
-
-        final sw = Stopwatch()..start();
-        final summary = await uploadSession(
-          session,
-          _settings(folders: true),
-          writeShot: writer,
-          ensureFolder: rec.ensureFolder,
-          onProgress: rec.onProgress,
-          writeTimeout: const Duration(milliseconds: 100),
-          maxAutoRetries: 2,
-          retryDelays: const [
-            Duration(milliseconds: 10),
-            Duration(milliseconds: 10),
-          ],
-        );
-        sw.stop();
-
-        expect(calls, 3,
-            reason: 'exactly one attempted shot per round — shots 2-3 are '
-                'skipped instead of each burning their own timeout');
-        expect(sw.elapsed, lessThan(const Duration(milliseconds: 700)),
-            reason: '3 rounds ≈ 3 timeouts + 2 backoffs ≈ 320ms; the old '
-                'serial grind (every shot waiting out its timeout, every '
-                'round) needs ≥ 900ms of timeouts alone');
-        expect(summary.allOk, isFalse);
-        expect(summary.outcomes[0].ok, isFalse);
-        expect(summary.outcomes[0].error, 'Write timed out after 100ms');
-        expect(summary.outcomes[1].ok, isFalse);
-        expect(summary.outcomes[1].error, connectionLostSkipMessage);
-        expect(summary.outcomes[2].ok, isFalse);
-        expect(summary.outcomes[2].error, connectionLostSkipMessage);
-        expect(summary.uploadedCount, 0);
-        expect(summary.remaining, shots,
-            reason: 'all three stay staged for the manual Retry');
-        for (final s in shots) {
-          expect(File(s.localPath).existsSync(), isTrue,
-              reason: 'timed-out and skipped shots keep their local files');
-        }
-        expect(session.shots, shots);
-        expect(rec.progress, [
-          (done: 1, total: 3),
-          (done: 2, total: 3),
-          (done: 3, total: 3),
-        ],
-            reason: 'the failures only finalize once no round can re-attempt '
-                'them — done never moves backwards');
-
-        // Manual Retry (the review page re-invokes the uploader on the
-        // remaining entries) with the share back: finishes the batch.
-        final retry = await uploadSession(
-          session,
-          _settings(folders: true),
-          only: summary.remaining,
-          writeShot: rec.writeShot,
-          ensureFolder: rec.ensureFolder,
-          writeTimeout: const Duration(milliseconds: 100),
-        );
-
-        expect(retry.allOk, isTrue);
-        expect(retry.remaining, isEmpty);
-        expect(rec.writes, hasLength(3),
-            reason: 'the auto-retry rounds never recorded a write; the '
-                'manual Retry wrote all three');
-        expect(session.shots, isEmpty);
-        expect(session.dir.existsSync(), isFalse);
-      });
-
-      test('zero-progress rounds are bounded: a writer that dies instantly '
-          'on every call with maxAutoRetries=1 runs exactly 2 rounds, then '
-          'stops', () async {
-        final session = await _session('100438', [
-          '100438_20260908_101112_1.jpg',
-          '100438_20260908_101113_2.jpg',
-          '100438_20260908_101114_3.jpg',
-        ]);
-        final rec = _Recorder();
-
-        var calls = 0;
-        Future<void> writer(String remotePath, Uint8List bytes) async {
-          calls += 1;
-          // Throwing TimeoutException IS the dead-connection signal (the
-          // real writer surfaces the per-shot .timeout the same way) — and
-          // it fires instantly, the injected analog of a dial that cannot
-          // come up: every round makes zero progress.
-          throw TimeoutException('connection dead instantly');
-        }
-
-        final summary = await uploadSession(
-          session,
-          _settings(folders: true),
-          writeShot: writer,
-          ensureFolder: rec.ensureFolder,
-          onProgress: rec.onProgress,
-          writeTimeout: const Duration(seconds: 30), // never reached
-          maxAutoRetries: 1,
-          retryDelays: const [Duration(milliseconds: 5)],
-        );
-
-        expect(calls, 2,
-            reason: 'initial round + exactly one auto-retry — the first '
-                'retry always runs, but a zero-progress round does not earn '
-                'a third once the bound is spent');
-        expect(summary.allOk, isFalse);
-        expect(summary.outcomes[0].error, 'connection dead instantly');
-        expect(summary.outcomes[1].error, connectionLostSkipMessage);
-        expect(summary.outcomes[2].error, connectionLostSkipMessage);
-        expect(summary.remaining, hasLength(3));
-        expect(rec.progress.last, (done: 3, total: 3));
-      });
-
-      test('BOTH auto-retry rounds run under maxAutoRetries=2 when every '
-          'round makes progress: a connection that dies under every second '
-          'shot still finishes allOk', () async {
-        final session = await _session('100438', [
-          '100438_20260908_101112_1.jpg',
-          '100438_20260908_101113_2.jpg',
-          '100438_20260908_101114_3.jpg',
-        ]);
-        final rec = _Recorder();
-
-        // Every EVEN call stalls out (the connection dies under it); every
-        // odd call succeeds. Round 1 uploads shot 1 and dies under shot 2;
-        // retry 1 uploads shot 2 and dies under shot 3; retry 2 uploads
-        // shot 3. Each round's progress is what keeps the gate open for the
-        // next one — with a bound of 1 the batch would stop at 4 calls.
-        final hang = Completer<void>();
-        var calls = 0;
-        Future<void> writer(String remotePath, Uint8List bytes) {
-          calls += 1;
-          if (calls.isEven) return hang.future;
-          return rec.writeShot(remotePath, bytes);
-        }
-
-        final summary = await uploadSession(
-          session,
-          _settings(folders: true),
-          writeShot: writer,
-          ensureFolder: rec.ensureFolder,
-          onProgress: rec.onProgress,
-          writeTimeout: const Duration(milliseconds: 100),
-          maxAutoRetries: 2,
-          retryDelays: const [
-            Duration(milliseconds: 10),
-            Duration(milliseconds: 10),
-          ],
-        );
-
-        expect(calls, 5,
-            reason: 'three rounds — initial + BOTH retries — pinning the '
-                'round-counting machinery: round 2 must be reachable while '
-                'retryCount < maxAutoRetries');
-        expect(rec.writes, hasLength(3));
-        expect(summary.allOk, isTrue);
-        expect(summary.uploadedCount, 3);
-        expect(summary.remaining, isEmpty);
-        expect(rec.progress, [
-          (done: 1, total: 3),
-          (done: 2, total: 3),
-          (done: 3, total: 3),
-        ]);
-        expect(session.shots, isEmpty);
-        expect(session.dir.existsSync(), isFalse);
-      });
-
-      test('timeout fires per shot, not per batch — each of several slow '
-          'shots gets its own budget', () async {
+      test('write timeout: connection closed, shot retried on a FRESH '
+          'connection before the next shot, batch finishes allOk', () async {
         final session = await _session('100438', ['a.jpg', 'b.jpg', 'c.jpg']);
-        final rec = _Recorder();
-
-        // Every write takes 30ms. With a 40ms PER-SHOT timeout all three
-        // fit (3 x 30ms = 90ms total); if the budget were shared across the
-        // batch, the third write would blow past the cumulative 40ms mark.
-        Future<void> writer(String remotePath, Uint8List bytes) async {
-          await Future<void>.delayed(const Duration(milliseconds: 30));
-          return rec.writeShot(remotePath, bytes);
+        final dials = _Dials();
+        // c1's only write hangs — dead connection. c2 is healthy.
+        var count = 0;
+        Future<UploadConnection> dial() {
+          count++;
+          if (count == 1) {
+            final c = _ScriptedConn('c1', dials.log)..writePlan.add(hang);
+            dials.conns.add(c);
+            return Future.value(c);
+          }
+          final c = _ScriptedConn('c$count', dials.log);
+          dials.conns.add(c);
+          return Future.value(c);
         }
 
         final summary = await uploadSession(
           session,
           _settings(folders: false),
-          writeShot: writer,
-          ensureFolder: rec.ensureFolder,
+          dial: dial,
+          writeTimeout: _fast,
+          redialDelay: _tick,
+        );
+
+        expect(
+          dials.log,
+          containsAllInOrder([
+            'c1 write /zdrive/InvoiceData/a.jpg',
+            'c1 close',
+            'c2 ensure /zdrive/InvoiceData',
+            'c2 write /zdrive/InvoiceData/a.jpg',
+            'c2 write /zdrive/InvoiceData/b.jpg',
+            'c2 write /zdrive/InvoiceData/c.jpg',
+          ]),
+          reason: 'the timed-out shot is retried on the redial BEFORE the '
+              'batch moves on; folders re-ensured on the fresh connection',
+        );
+        expect(summary.allOk, isTrue);
+        expect(summary.uploadedCount, 3);
+        expect(session.shots, isEmpty);
+        expect(session.dir.existsSync(), isFalse);
+      });
+
+      test('a timeout counts against the write phase only — several slow '
+          'shots each get their own budget', () async {
+        final session = await _session('100438', ['a.jpg', 'b.jpg', 'c.jpg']);
+        final dials = _Dials();
+
+        Future<UploadConnection> dial() async {
+          final c = _SlowConn('c${dials.count + 1}', dials.log);
+          dials.count++;
+          dials.conns.add(c);
+          return c;
+        }
+
+        final summary = await uploadSession(
+          session,
+          _settings(folders: false),
+          dial: dial,
           writeTimeout: const Duration(milliseconds: 40),
         );
 
         expect(summary.allOk, isTrue,
             reason: 'each shot got a fresh 40ms budget; 3 slow writes fit');
-        expect(rec.writes, hasLength(3));
+        expect(dials.conns.single.writes, 3);
       });
+  });
 
-      test('a timeout counts against the write phase only — the injected '
-          'writer IS the write phase, so it is bounded end-to-end', () async {
-        final session = await _session('100438', ['a.jpg']);
-        final rec = _Recorder();
-
-        final gate = Completer<void>();
-        Future<void> writer(String remotePath, Uint8List bytes) => gate.future;
+  group('end-of-pass rescue + partial-file cleanup', () {
+      test('a shot that failed both attempts uploads on the end-of-pass '
+          're-attempt (allOk, local deleted)', () async {
+        final session = await _session('100438', ['a.jpg', 'b.jpg']);
+        final dials = _Dials();
+        // a.jpg fails twice, succeeds on the third call (the rescue).
+        final c1 = _ScriptedConn('c1', dials.log)
+          ..writePlan.addAll([
+            StateError('server busy'),
+            StateError('server busy'),
+          ]);
+        dials.conns.add(c1);
 
         final summary = await uploadSession(
           session,
           _settings(folders: false),
-          writeShot: writer,
-          ensureFolder: rec.ensureFolder,
-          onProgress: rec.onProgress,
-          writeTimeout: const Duration(milliseconds: 50),
-          // The lone timed-out shot now earns auto-retry rounds too; this
-          // test is about the per-shot bound, so keep the backoffs short.
-          retryDelays: const [Duration(milliseconds: 1)],
+          dial: () async => c1,
+          redialDelay: _tick,
+        );
+
+        expect(
+          dials.log.where((e) => e.contains('write')).toList(),
+          [
+            'c1 write /zdrive/InvoiceData/a.jpg',
+            'c1 write /zdrive/InvoiceData/a.jpg',
+            'c1 write /zdrive/InvoiceData/b.jpg',
+            'c1 write /zdrive/InvoiceData/a.jpg',
+          ],
+          reason: 'two in-place attempts, then B, then the rescue re-attempt '
+              'of A after the pass ends',
+        );
+        expect(summary.allOk, isTrue);
+        expect(session.shots, isEmpty,
+            reason: 'the rescued shot deletes its local file');
+      });
+
+      test('final failure with a partial remote file: the rescue re-attempts, '
+          'then the broken remote copy is deleted and the error says so',
+          () async {
+        final session = await _session('100438', ['a.jpg', 'b.jpg']);
+        final aPath = '/zdrive/InvoiceData/a.jpg';
+        final dials = _Dials();
+        // Write order is A, A (retry), B, A (rescue) — B must succeed.
+        final c1 = _ScriptedConn('c1', dials.log)
+          ..writePlan.addAll([
+            StateError('file in use'),
+            StateError('file in use'),
+            null, // B uploads
+            StateError('file in use'), // the rescue re-attempt fails
+          ])
+          ..existsAnswers[aPath] = true;
+        dials.conns.add(c1);
+
+        final summary = await uploadSession(
+          session,
+          _settings(folders: false),
+          dial: () async => c1,
+          redialDelay: _tick,
         );
 
         expect(summary.allOk, isFalse);
-        expect(summary.outcomes.single.error, 'Write timed out after 50ms');
-        expect(rec.progress, [(done: 1, total: 1)]);
+        expect(summary.uploadedCount, 1, reason: 'B uploaded');
+        expect(summary.remaining, hasLength(1));
+        expect(summary.outcomes[0].error, contains('file in use'));
+        expect(summary.outcomes[0].error,
+            contains('partial server copy removed'),
+            reason: 'the operator is told the broken file is gone');
+        expect(
+          dials.log.where((e) => e.contains('delete')).toList(),
+          ['c1 delete $aPath'],
+          reason: 'exactly the broken copy is removed — B was never partial',
+        );
+        expect(File(summary.remaining.single.localPath).existsSync(), isTrue,
+            reason: 'the failed shot stays staged for Retry');
+        expect(session.shots, hasLength(1));
       });
-    });
+
+      test('final failure while the server still holds the partial file: '
+          'the delete is refused and the error names the lock window',
+          () async {
+        final session = await _session('100438', ['a.jpg']);
+        final aPath = '/zdrive/InvoiceData/a.jpg';
+        final dials = _Dials();
+        final c1 = _ScriptedConn('c1', dials.log)
+          ..writePlan.addAll([
+            StateError('file in use'),
+            StateError('file in use'),
+            StateError('file in use'),
+          ])
+          ..existsAnswers[aPath] = true
+          ..deleteError = StateError('sharing violation');
+        dials.conns.add(c1);
+
+        final summary = await uploadSession(
+          session,
+          _settings(folders: false),
+          dial: () async => c1,
+          redialDelay: _tick,
+        );
+
+        expect(summary.outcomes.single.error, contains('file in use'));
+        expect(summary.outcomes.single.error,
+            contains('still holds a partial copy'),
+            reason: 'the operator learns the file clears on its own');
+        expect(
+          dials.log.where((e) => e.contains('delete')).toList(),
+          ['c1 delete $aPath'],
+          reason: 'the cleanup was attempted, the server refused it',
+        );
+      });
+
+      test('final failure with NO partial remote file: no delete attempt, '
+          'plain error', () async {
+        final session = await _session('100438', ['a.jpg']);
+        final dials = _Dials();
+        final c1 = _ScriptedConn('c1', dials.log)
+          ..writePlan.addAll([
+            StateError('access denied'),
+            StateError('access denied'),
+            StateError('access denied'),
+          ]);
+        dials.conns.add(c1);
+
+        final summary = await uploadSession(
+          session,
+          _settings(folders: false),
+          dial: () async => c1,
+          redialDelay: _tick,
+        );
+
+        expect(summary.outcomes.single.error, contains('access denied'));
+        expect(dials.log.where((e) => e.contains('delete')), isEmpty,
+            reason: 'nothing was ever created server-side — nothing to remove');
+        expect(dials.log.where((e) => e.contains('exists')).toList(),
+            ['c1 exists /zdrive/InvoiceData/a.jpg'],
+            reason: 'the probe still ran');
+      });
   });
+
+  group('dead-network abort (bounded, no serial timeouts)', () {
+      test('two write timeouts with no success in between abort the pass: '
+          'remaining shots are skip-marked without being attempted',
+          () async {
+        final session = await _session('100438', ['a.jpg', 'b.jpg', 'c.jpg']);
+        final shots = session.shots.toList();
+        final dials = _Dials();
+        // Every write on every connection hangs forever.
+        Future<UploadConnection> dial() {
+          final c = _ScriptedConn('c${dials.count + 1}', dials.log)
+            ..writePlan.add(hang);
+          dials.count++;
+          dials.conns.add(c);
+          return Future.value(c);
+        }
+        final progress = <({int done, int total})>[];
+
+        final sw = Stopwatch()..start();
+        final summary = await uploadSession(
+          session,
+          _settings(folders: false),
+          dial: dial,
+          writeTimeout: _fast,
+          redialDelay: _tick,
+          dialTimeout: _fast,
+          onProgress: (done, total) => progress.add((done: done, total: total)),
+        );
+        sw.stop();
+
+        final writes =
+            dials.log.where((e) => e.contains('write')).toList();
+        expect(writes, hasLength(2), reason: 'only shot A is ever attempted');
+        expect(writes.every((e) => e.endsWith('a.jpg')), isTrue);
+        expect(dials.count, 2, reason: 'initial dial + one redial, then stop');
+        expect(summary.allOk, isFalse);
+        expect(summary.outcomes[0].error, 'Write timed out after 50ms');
+        expect(summary.outcomes[1].error, connectionLostSkipMessage);
+        expect(summary.outcomes[2].error, connectionLostSkipMessage);
+        expect(summary.remaining, shots,
+            reason: 'everything stays staged for the manual Retry');
+        for (final s in shots) {
+          expect(File(s.localPath).existsSync(), isTrue);
+        }
+        expect(progress, [
+          (done: 1, total: 3),
+          (done: 2, total: 3),
+          (done: 3, total: 3),
+        ], reason: 'failures finalize once, at the end');
+        expect(sw.elapsed, lessThan(const Duration(milliseconds: 700)),
+            reason: '2 timeouts + a redial ≈ 110ms; a serial grind over '
+                'every shot would need ≥ 450ms of timeouts alone');
+      });
+
+      test('a redial that cannot come up aborts instantly: unattempted shots '
+          'are skip-marked, the timed-out shot keeps its message',
+          () async {
+        final session = await _session('100438', ['a.jpg', 'b.jpg']);
+        final dials = _Dials()..failDialsFrom = 2;
+        Future<UploadConnection> dial() {
+          dials.count++;
+          if (dials.count >= 2) {
+            return Completer<UploadConnection>().future; // dial hangs → bound
+          }
+          final c = _ScriptedConn('c1', dials.log)..writePlan.add(hang);
+          dials.conns.add(c);
+          return Future.value(c);
+        }
+
+        final summary = await uploadSession(
+          session,
+          _settings(folders: false),
+          dial: dial,
+          writeTimeout: _fast,
+          redialDelay: _tick,
+          dialTimeout: _fast,
+        );
+
+        expect(summary.allOk, isFalse);
+        expect(summary.outcomes[0].error, 'Write timed out after 50ms');
+        expect(summary.outcomes[1].error, connectionLostSkipMessage);
+        expect(dials.log.where((e) => e.contains('write')).toList(),
+            ['c1 write /zdrive/InvoiceData/a.jpg'],
+            reason: 'shot B is never attempted on a dead network');
+      });
+
+      test('the initial dial failing throws (unchanged first-run behavior)',
+          () async {
+        final session = await _session('100438', ['a.jpg']);
+        final dials = _Dials()..failDialsFrom = 1;
+
+        await expectLater(
+          uploadSession(session, _settings(folders: false), dial: dials.call),
+          throwsStateError,
+        );
+      });
+  });
+
+  group('abandoned futures must not leak unhandled zone errors', () {
+      test('a write that errors AFTER its timeout abandoned it stays silent',
+          () async {
+        final session = await _session('100438', ['a.jpg', 'b.jpg']);
+        final dials = _Dials();
+        // c1's write completes with an error 150ms after the 50ms timeout
+        // fires. Under .timeout() that late error becomes an unhandled zone
+        // exception (the device log's "Bad state: StreamSink is closed"
+        // spam); the uploader must swallow it.
+        final c1 = _LateErrorConn('c1', dials.log);
+        dials.conns.add(c1);
+        Future<UploadConnection> dial() async {
+          if (dials.count++ == 0) return c1;
+          final c = _ScriptedConn('c2', dials.log);
+          dials.conns.add(c);
+          return c;
+        }
+
+        final summary = await uploadSession(
+          session,
+          _settings(folders: false),
+          dial: dial,
+          writeTimeout: _fast,
+          redialDelay: _tick,
+        );
+
+        expect(summary.allOk, isTrue,
+            reason: 'the redial rescued both shots');
+        // Outlive the late error: if it leaks, flutter_test fails this test
+        // with "Unhandled exception" after this await.
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+      });
+  });
+}
+
+/// ensureFolder that always throws — the share "must pre-exist" path.
+class _ThrowingEnsureConn extends _ScriptedConn {
+  _ThrowingEnsureConn(super.name, super.log);
+
+  @override
+  Future<void> ensureFolder(String path) {
+    log.add('$name ensure $path');
+    throw StateError('already exists');
+  }
+}
+
+/// A write that completes with an error only AFTER the caller abandoned it.
+class _LateErrorConn extends _ScriptedConn {
+  _LateErrorConn(super.name, super.log);
+
+  @override
+  Future<void> write(String remotePath, Uint8List bytes) {
+    log.add('$name write $remotePath');
+    writes++;
+    if (writes == 1) {
+      return Future<void>.delayed(
+        const Duration(milliseconds: 150),
+        () => throw StateError('late socket death'),
+      );
+    }
+    return Future.value();
+  }
+}
+
+/// Every write takes 30ms — slow but progressing, never timed out.
+class _SlowConn extends _ScriptedConn {
+  _SlowConn(super.name, super.log);
+
+  @override
+  Future<void> write(String remotePath, Uint8List bytes) {
+    log.add('$name write $remotePath');
+    writes++;
+    return Future<void>.delayed(const Duration(milliseconds: 30));
+  }
 }
