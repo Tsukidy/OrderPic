@@ -16,6 +16,13 @@ import 'session.dart';
 /// on a LAN is generous.
 const Duration smbWriteTimeout = Duration(seconds: 30);
 
+/// Bound for a RETRY write attempt (the in-place retry or the end-of-pass
+/// rescue). The first attempt gets the full [smbWriteTimeout]; a retry that
+/// also stalls — with the dial having just succeeded — is the signature of
+/// the server blocking the write behind a dead session's handle (see
+/// [serverHoldsFileMessage]), and is recognized at this shorter bound.
+const Duration smbRetryWriteTimeout = Duration(seconds: 15);
+
 /// Pause before redialing after a write timeout — gives a blipped network a
 /// moment to come back before the retry burns its attempt.
 const Duration smbRedialDelay = Duration(seconds: 2);
@@ -39,6 +46,16 @@ const Duration _connCloseTimeout = Duration(seconds: 5);
 const String connectionLostSkipMessage =
     'Connection lost — skipped (will retry)';
 
+/// Error text for a shot whose retry stalled on a FRESH connection: the
+/// dial succeeding proves the network is fine, so the stall is the server
+/// blocking the write behind the dead session's still-open handle on the
+/// partially written file (Windows reaps it in a minute or two; nothing
+/// client-side can release it sooner). Retry after the window overwrites
+/// cleanly.
+const String serverHoldsFileMessage =
+    'Upload stalled — the server still holds the partially written file '
+    '(it clears in a minute or two); press Retry to overwrite it';
+
 /// Appended to a finally-failed shot's error when the broken remote partial
 /// was removed — the operator must know the share is clean.
 const String _partialRemovedNote =
@@ -57,6 +74,20 @@ const String _partialHeldNote =
 String _writeTimeoutMessage(Duration d) => d.inSeconds >= 1
     ? 'Write timed out after ${d.inSeconds}s'
     : 'Write timed out after ${d.inMilliseconds}ms';
+
+/// True when [error]'s text is a server sharing-violation refusal — the
+/// dead-session lock window speaking. The raw OS text ("being used by
+/// another process") reads like an app bug, so the guidance note must ride
+/// along whenever it appears.
+bool _looksLikeLockRefusal(String error) {
+  final e = error.toLowerCase();
+  return e.contains('in use') ||
+      e.contains('used by another process') ||
+      e.contains('sharing violation');
+}
+
+String _withLockNote(String error) =>
+    _looksLikeLockRefusal(error) ? '$error$_partialHeldNote' : error;
 
 /// One upload connection's SMB surface: everything [uploadSession] needs
 /// from one (possibly freshly redialed) connection. Production wraps a real
@@ -258,10 +289,12 @@ Future<UploadSummary> uploadSession(
   UploadConnectionFactory? dial,
   void Function(int done, int total)? onProgress,
   Duration? writeTimeout,
+  Duration? retryWriteTimeout,
   Duration? redialDelay,
   Duration? dialTimeout,
 }) async {
   final timeout = writeTimeout ?? smbWriteTimeout;
+  final retryBound = retryWriteTimeout ?? smbRetryWriteTimeout;
   final pause = redialDelay ?? smbRedialDelay;
   final dialBound = dialTimeout ?? smbDialTimeout;
   final c = settings.connection;
@@ -279,6 +312,7 @@ Future<UploadSummary> uploadSession(
   // Final state per shot, in [shots] order.
   final results = List<UploadOutcome?>.filled(total, null);
   final counted = List<bool>.filled(total, false);
+  final ghostLocked = List<bool>.filled(total, false);
   var settled = 0; // successes + finalized failures — never decreases
   void fire() => onProgress?.call(settled, total);
 
@@ -352,6 +386,7 @@ Future<UploadSummary> uploadSession(
     if (results[i] != null && results[i]!.ok) continue;
     final shot = shots[i];
     var attempts = 0;
+    var firstAttemptTimedOut = false;
     while (attempts < 2 && !aborted) {
       attempts++;
       if (!await ensureLive()) {
@@ -361,12 +396,13 @@ Future<UploadSummary> uploadSession(
         aborted = true;
         break;
       }
+      final attemptBound = attempts == 1 ? timeout : retryBound;
       try {
         final bytes = await File(shot.localPath).readAsBytes();
         await _bounded(
           conn!.write(targetOf(shot), bytes),
-          timeout,
-          onTimeout: _writeTimeoutMessage(timeout),
+          attemptBound,
+          onTimeout: _writeTimeoutMessage(attemptBound),
         );
         await session.deleteLocal(shot);
         results[i] = UploadOutcome(shot, true, null);
@@ -377,16 +413,31 @@ Future<UploadSummary> uploadSession(
         break;
       } on TimeoutException {
         // Dead connection. The shot keeps its timeout message and stays
-        // staged; the retry (this loop) runs on a fresh dial. Two timeouts
-        // with no success between them = a network that stays dead → stop.
+        // staged; the retry (this loop) runs on a fresh dial.
         connDead = true;
-        results[i] =
-            UploadOutcome(shot, false, _writeTimeoutMessage(timeout));
-        deadStreak++;
-        if (deadStreak >= 2) {
-          skipMarkFrom(i + 1);
-          aborted = true;
+        if (attempts == 2 && firstAttemptTimedOut) {
+          // GHOST-LOCKED: the retry ran on a fresh connection — the dial
+          // succeeded, so the network is fine — and STILL stalled on the
+          // same file. That is the server blocking the write behind the
+          // dead session's handle on this shot's partial file, not a dead
+          // network. No attempt inside this call can win, and probing
+          // would hang the same way; the remaining shots must not be
+          // punished for it.
+          results[i] = UploadOutcome(shot, false, serverHoldsFileMessage);
+          ghostLocked[i] = true;
+        } else {
+          results[i] = UploadOutcome(
+            shot,
+            false,
+            _writeTimeoutMessage(attemptBound),
+          );
+          deadStreak++;
+          if (deadStreak >= 2) {
+            skipMarkFrom(i + 1);
+            aborted = true;
+          }
         }
+        firstAttemptTimedOut = true;
       } catch (e) {
         // Per-shot failure on a live connection (access denied, locked
         // file, unreadable local file…) — the in-place retry or the
@@ -398,19 +449,22 @@ Future<UploadSummary> uploadSession(
 
   // End-of-pass rescue: one more attempt per still-failed shot, then the
   // no-broken-files cleanup. Skipped entirely when the pass aborted (there
-  // is no live connection to rescue with).
+  // is no live connection to rescue with) — and per shot when that shot is
+  // ghost-locked (no attempt inside this call can win; the message already
+  // tells the operator what to do).
   if (!aborted) {
     for (var i = 0; i < total; i++) {
       final r = results[i];
       if (r == null || r.ok) continue;
+      if (ghostLocked[i]) continue;
       final shot = r.shot;
       if (!await ensureLive()) break; // network dropped mid-rescue — stop
       try {
         final bytes = await File(shot.localPath).readAsBytes();
         await _bounded(
           conn!.write(targetOf(shot), bytes),
-          timeout,
-          onTimeout: _writeTimeoutMessage(timeout),
+          retryBound,
+          onTimeout: _writeTimeoutMessage(retryBound),
         );
         await session.deleteLocal(shot);
         results[i] = UploadOutcome(shot, true, null);
@@ -419,21 +473,30 @@ Future<UploadSummary> uploadSession(
         settled++;
         fire();
       } catch (e) {
-        // Final failure — never leave a broken partial on the share.
+        // Final failure — never leave a broken partial on the share. The
+        // probes are bounded: against a locked file the server blocks them
+        // like it blocked the write.
         var note = '';
         var hadPartial = false;
         try {
-          hadPartial = await conn!.exists(targetOf(shot));
+          hadPartial =
+              await _bounded(conn!.exists(targetOf(shot)), timeout);
+        } on TimeoutException {
+          // Blocked probe — whether a partial exists is unknowable; the
+          // delete would hang the same way, so don't attempt it.
         } catch (_) {/* probe failed — try the delete anyway */}
         if (hadPartial) {
           try {
-            await conn!.delete(targetOf(shot));
+            await _bounded(conn!.delete(targetOf(shot)), timeout);
             note = _partialRemovedNote;
           } catch (_) {
             note = _partialHeldNote;
           }
         }
-        results[i] = UploadOutcome(shot, false, '${e.toString()}$note');
+        final message = note.isEmpty
+            ? _withLockNote(e.toString())
+            : '${e.toString()}$note';
+        results[i] = UploadOutcome(shot, false, message);
       }
     }
   }

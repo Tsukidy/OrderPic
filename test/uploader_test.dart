@@ -578,10 +578,120 @@ void main() {
       });
   });
 
+  group('ghost-locked file (the server holds the partial after a dead write)',
+      () {
+      test('retry timing out on a FRESH connection marks the shot '
+          'server-held, the batch CONTINUES, and the shot is not rescued or '
+          'probed', () async {
+        final session = await _session('100438', ['a.jpg', 'b.jpg']);
+        final shots = session.shots.toList();
+        final dials = _Dials();
+        // c1: a.jpg hangs (network blip kills the write). c2: a.jpg hangs
+        // again (the server blocks the write behind the dead session's
+        // handle) but b.jpg succeeds — the network is fine, the FILE is
+        // locked.
+        Future<UploadConnection> dial() {
+          final n = dials.count + 1;
+          final c = _ScriptedConn('c$n', dials.log);
+          if (n <= 2) c.writePlan.add(hang);
+          dials.count++;
+          dials.conns.add(c);
+          return Future.value(c);
+        }
+
+        final summary = await uploadSession(
+          session,
+          _settings(folders: false),
+          dial: dial,
+          writeTimeout: _fast,
+          retryWriteTimeout: _fast,
+          redialDelay: _tick,
+        );
+
+        expect(summary.allOk, isFalse);
+        expect(summary.outcomes[0].error, contains('still holds'),
+            reason: 'the operator learns the file clears on its own');
+        expect(summary.outcomes[1].ok, isTrue,
+            reason: 'the batch moved on and uploaded B');
+        expect(summary.remaining, [shots[0]]);
+        expect(
+          dials.log
+              .where((e) => e.contains('write') && e.endsWith('a.jpg'))
+              .toList(),
+          hasLength(2),
+          reason: 'exactly the two in-place attempts — the rescue skips a '
+              'server-held shot (it cannot win, and probing would hang)',
+        );
+        expect(dials.log.where((e) => e.contains('exists')), isEmpty,
+            reason: 'no probe for a shot whose lock is the known cause');
+        expect(dials.log.where((e) => e.contains('delete')), isEmpty);
+        expect(File(shots[0].localPath).existsSync(), isTrue,
+            reason: 'stays staged for the manual Retry');
+      });
+
+      test('a final fast error naming a lock gets the held-file guidance '
+          'even when no partial was probed', () async {
+        final session = await _session('100438', ['a.jpg']);
+        final dials = _Dials();
+        final c1 = _ScriptedConn('c1', dials.log)
+          ..writePlan.addAll([
+            StateError(
+                'The process cannot access the file because it is being '
+                'used by another process'),
+            StateError(
+                'The process cannot access the file because it is being '
+                'used by another process'),
+            StateError(
+                'The process cannot access the file because it is being '
+                'used by another process'),
+          ]);
+        dials.conns.add(c1);
+
+        final summary = await uploadSession(
+          session,
+          _settings(folders: false),
+          dial: () async => c1,
+          redialDelay: _tick,
+        );
+
+        expect(summary.outcomes.single.error, contains('being used by'));
+        expect(summary.outcomes.single.error, contains('still holds'),
+            reason: 'the raw OS refusal alone reads like a bug — the '
+                'guidance must ride along');
+      });
+
+      test('a hanging exists() probe is bounded — the summary still '
+          'completes with the plain error', () async {
+        final session = await _session('100438', ['a.jpg']);
+        final dials = _Dials();
+        final c1 = _HangingExistsConn('c1', dials.log)
+          ..writePlan.addAll([
+            StateError('server busy'),
+            StateError('server busy'),
+            StateError('server busy'),
+          ]);
+        dials.conns.add(c1);
+
+        final summary = await uploadSession(
+          session,
+          _settings(folders: false),
+          dial: () async => c1,
+          writeTimeout: _fast,
+          redialDelay: _tick,
+        );
+
+        expect(summary.outcomes.single.error, contains('server busy'));
+        expect(summary.outcomes.single.error, isNot(contains('still holds')));
+        expect(dials.log.where((e) => e.contains('delete')), isEmpty,
+            reason: 'the probe never answered — nothing says a partial '
+                'exists');
+      });
+  });
+
   group('dead-network abort (bounded, no serial timeouts)', () {
-      test('two write timeouts with no success in between abort the pass: '
-          'remaining shots are skip-marked without being attempted',
-          () async {
+      test('dead network aborts bounded: a ghost-locked shot does not count '
+          'toward the abort, the NEXT shot\'s timeout does; unattempted shots '
+          'are skip-marked without being attempted', () async {
         final session = await _session('100438', ['a.jpg', 'b.jpg', 'c.jpg']);
         final shots = session.shots.toList();
         final dials = _Dials();
@@ -601,20 +711,27 @@ void main() {
           _settings(folders: false),
           dial: dial,
           writeTimeout: _fast,
+          retryWriteTimeout: _fast,
           redialDelay: _tick,
           dialTimeout: _fast,
           onProgress: (done, total) => progress.add((done: done, total: total)),
         );
         sw.stop();
 
+        // A: timeout → redial → timeout again on the fresh connection = the
+        // server-holds-the-file signature, NOT a dead network → no abort.
+        // B: timeout on its first attempt (streak 2) → abort. C: skipped.
         final writes =
             dials.log.where((e) => e.contains('write')).toList();
-        expect(writes, hasLength(2), reason: 'only shot A is ever attempted');
-        expect(writes.every((e) => e.endsWith('a.jpg')), isTrue);
-        expect(dials.count, 2, reason: 'initial dial + one redial, then stop');
+        expect(writes, hasLength(3),
+            reason: 'A twice (in-place retry), then B once — C is never '
+                'attempted');
+        expect(dials.count, 3, reason: 'initial dial + a redial per timeout');
         expect(summary.allOk, isFalse);
-        expect(summary.outcomes[0].error, 'Write timed out after 50ms');
-        expect(summary.outcomes[1].error, connectionLostSkipMessage);
+        expect(summary.outcomes[0].error, contains('still holds'),
+            reason: 'A is ghost-locked: the redial proved the network fine, '
+                'the stalled retry points at the file');
+        expect(summary.outcomes[1].error, 'Write timed out after 50ms');
         expect(summary.outcomes[2].error, connectionLostSkipMessage);
         expect(summary.remaining, shots,
             reason: 'everything stays staged for the manual Retry');
@@ -626,9 +743,9 @@ void main() {
           (done: 2, total: 3),
           (done: 3, total: 3),
         ], reason: 'failures finalize once, at the end');
-        expect(sw.elapsed, lessThan(const Duration(milliseconds: 700)),
-            reason: '2 timeouts + a redial ≈ 110ms; a serial grind over '
-                'every shot would need ≥ 450ms of timeouts alone');
+        expect(sw.elapsed, lessThan(const Duration(milliseconds: 900)),
+            reason: '3 timeouts + 2 redial pauses ≈ 155ms; a serial grind '
+                'over every shot would need ≥ 450ms of timeouts alone');
       });
 
       test('a redial that cannot come up aborts instantly: unattempted shots '
@@ -748,5 +865,17 @@ class _SlowConn extends _ScriptedConn {
     log.add('$name write $remotePath');
     writes++;
     return Future<void>.delayed(const Duration(milliseconds: 30));
+  }
+}
+
+/// exists() that never answers — the server blocking the probe behind a
+/// locked handle.
+class _HangingExistsConn extends _ScriptedConn {
+  _HangingExistsConn(super.name, super.log);
+
+  @override
+  Future<bool> exists(String remotePath) {
+    log.add('$name exists $remotePath');
+    return Completer<bool>().future;
   }
 }
