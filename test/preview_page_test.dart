@@ -620,7 +620,7 @@ void main() {
       // Upload all is gated while the conversion runs.
       expect(find.byKey(const Key('upload_all_button')), findsNothing);
       expect(find.byKey(const Key('waiting_button')), findsOneWidget);
-      expect(find.text('Waiting for 1 conversion…'), findsOneWidget);
+      expect(find.text('Waiting… (1)'), findsOneWidget);
       expect(find.text('Add photo'), findsOneWidget,
           reason: 'capture never blocks on a pending conversion');
 
@@ -634,7 +634,7 @@ void main() {
       expect(find.byKey(const Key('thumb_pending_1')), findsNothing);
       expect(_thumbs(tester), hasLength(2),
           reason: 'the settled tile now decodes its image');
-      expect(find.text('Waiting for 1 conversion…'), findsNothing);
+      expect(find.text('Waiting… (1)'), findsNothing);
       expect(find.byKey(const Key('upload_all_button')), findsOneWidget,
           reason: 'the gate opened — upload is back');
     });
@@ -672,7 +672,7 @@ void main() {
       await tester.pump();
       expect(fake.sessions, isEmpty,
           reason: 'a pending conversion gates the upload');
-      expect(find.text('Waiting for 1 conversion…'), findsOneWidget);
+      expect(find.text('Waiting… (1)'), findsOneWidget);
 
       // The conversion settles (ready) → the upload starts BY ITSELF. The
       // done banner is the end signal (the fake completes synchronously
@@ -1278,6 +1278,121 @@ void main() {
         hasLength(2),
         reason: 'nothing half-written',
       );
+    });
+  });
+
+  group('PreviewPage narrow-screen layout (Task 6.8)', () {
+    // Regression: the gated button used to push its three-button row past
+    // the screen edge — a device reported ~24px of yellow/black stripes
+    // across it on a 360dp phone. The row now squeezes the button
+    // (Flexible) and its label truncates, so the surface must be narrow
+    // enough to force that squeeze; the default 800x600 test surface never
+    // does.
+    //
+    // Why the halved text scale: the harness' FlutterTest font draws glyphs
+    // ~2x wider than Roboto at the same point size, so a 360dp surface at
+    // full scale overflows OTHER chrome too (the order chip row — a
+    // pre-existing condition no real device hits, and out of scope here).
+    // Halving the scale puts the test back at the real device's label
+    // widths on the same 360dp geometry.
+    //
+    // RenderFlex overflow surfaces in tests as a FlutterError, so
+    // takeException() after the frame is the canary. Plain pumps, not
+    // pumpAndSettle: the pending tile's spinner never settles while the
+    // conversion is held open.
+    testWidgets('gated button squeezes into a 360dp row: no RenderFlex '
+        'overflow, label keeps the count, tap still arms', (tester) async {
+      tester.view.physicalSize = const Size(360, 800);
+      tester.view.devicePixelRatio = 1.0;
+      tester.platformDispatcher.textScaleFactorTestValue = 0.5;
+      addTearDown(tester.view.reset);
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+
+      final session = await _real(tester, () => _sessionOf('100438', 1));
+      final ready = session.shots.single;
+      final gate = Completer<void>();
+      final picked = await _real(tester, () => _pickedFile('IMG_0002.jpg'));
+
+      // Admitted BEFORE the page's first pump, so the very first frame is
+      // already the pending-state row (no 'Upload all' in it to overflow
+      // for unrelated reasons). The held processor keeps the conversion
+      // in flight for as long as the test wants.
+      final admission = admitPicked(
+        pickedPath: picked.path,
+        prefs: _settings(batch: true).upload,
+        session: session,
+        processor: _HeldProcessor(gate),
+      );
+      final fake = _FakeUploader()
+        ..next.add(
+          _summary([
+            ready,
+            admission.pending.copyWith(status: ShotStatus.ready),
+          ]),
+        );
+
+      await _pumpPreview(
+        tester,
+        session: session,
+        batch: true,
+        uploader: fake.call,
+      );
+
+      // Idle row with a pending shot: Retake / Add photo / gated button.
+      expect(tester.takeException(), isNull,
+          reason: 'the pending-state row must fit a 360dp screen');
+      expect(find.byKey(const Key('waiting_button')), findsOneWidget);
+      expect(find.text('Waiting… (1)'), findsOneWidget,
+          reason: 'the label is truncated, not replaced — the count stays');
+      expect(
+        tester.getSize(find.byKey(const Key('waiting_button'))).width,
+        lessThan(360.0),
+        reason: 'the gated button shares its row — it must fit, not span '
+            'or exceed the screen',
+      );
+
+      // Arming the gate re-lays out the same three buttons under status =
+      // waiting — the row the device report pointed at.
+      await tester.tap(find.byKey(const Key('waiting_button')));
+      await tester.pump();
+      expect(tester.takeException(), isNull,
+          reason: 'the armed waiting row must fit a 360dp screen');
+      expect(fake.sessions, isEmpty,
+          reason: 'the squeeze changed nothing about the tap: still gated '
+              '(the uploader must not have run)');
+    });
+
+    testWidgets('label truncates instead of wrapping when the row is even '
+        'tighter (3 pending, single-line label)', (tester) async {
+      tester.view.physicalSize = const Size(360, 800);
+      tester.view.devicePixelRatio = 1.0;
+      tester.platformDispatcher.textScaleFactorTestValue = 0.5;
+      addTearDown(tester.view.reset);
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+
+      final session = await _real(tester, () => _sessionOf('100438', 0));
+      final gate = Completer<void>();
+      final picked = await _real(tester, () => _pickedFile('IMG_0001.jpg'));
+
+      for (var i = 0; i < 3; i++) {
+        admitPicked(
+          pickedPath: picked.path,
+          prefs: _settings(batch: true).upload,
+          session: session,
+          processor: _HeldProcessor(gate),
+        );
+      }
+
+      await _pumpPreview(tester, session: session, batch: true);
+
+      expect(tester.takeException(), isNull,
+          reason: 'a longer label (3 pending) must not overflow either — '
+              'it truncates');
+      expect(find.text('Waiting… (3)'), findsOneWidget);
+      final label = tester.getSize(find.text('Waiting… (3)')).width;
+      expect(label, lessThan(100.0),
+          reason: 'the label is ellipsized to the squeezed button\'s share '
+              'of the row, not laid out at its full width');
     });
   });
 }

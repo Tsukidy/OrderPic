@@ -662,16 +662,29 @@ class _PreviewPageState extends State<PreviewPage> {
     );
   }
 
+  /// [ellipsize] opts a label into single-line truncation. It matters only
+  /// when the row squeezes the button (see [_waitingButton]): FilledButton
+  /// hosts the label in a Flexible of its own, so a width-bounded button
+  /// passes the bound down and the text truncates — left alone it would
+  /// wrap to two lines and stretch the row's height instead.
   FilledButton _filled({
     IconData? icon,
     required String label,
     VoidCallback? onPressed,
     Key? key,
+    bool ellipsize = false,
   }) {
     return FilledButton.icon(
       key: key,
       icon: Icon(icon),
-      label: Text(label),
+      label: ellipsize
+          ? Text(
+              label,
+              maxLines: 1,
+              softWrap: false,
+              overflow: TextOverflow.ellipsis,
+            )
+          : Text(label),
       onPressed: onPressed,
     );
   }
@@ -681,13 +694,22 @@ class _PreviewPageState extends State<PreviewPage> {
   /// has converted"), and the session listener auto-starts it the moment
   /// the last conversion settles. Capture never blocks on it — Add photo
   /// stays available alongside.
+  ///
+  /// Narrow-screen contract: whenever this button shares a row with Retake
+  /// and Add photo, the row wraps it in a [Flexible] — the two fixed
+  /// siblings leave less room than the label wants, so the button shrinks
+  /// and the label ellipsizes (device-reported bug: the row used to
+  /// overflow by the label's excess). The count stays the label's point —
+  /// 'Waiting… (2)' — so it is kept short instead of spelled out
+  /// ('Waiting for 2 conversions…'), which alone overflowed 360 dp.
   FilledButton _waitingButton({Key? key}) {
     final n = widget.session.pendingShots.length;
     return _filled(
       key: key ?? const Key('waiting_button'),
       icon: Icons.hourglass_top,
-      label: 'Waiting for $n conversion${n == 1 ? '' : 's'}…',
+      label: 'Waiting… ($n)',
       onPressed: _uploadAll,
+      ellipsize: true,
     );
   }
 
@@ -722,7 +744,11 @@ class _PreviewPageState extends State<PreviewPage> {
                 label: 'Add photo',
                 onPressed: () => _openCamera(removeLast: false),
               ),
-              _waitingButton(),
+              // The only squeezable child: on a narrow screen the two fixed
+              // buttons can leave less room than the label needs — the
+              // button shrinks and the label ellipsizes instead of the row
+              // overflowing (see [_waitingButton]).
+              Flexible(child: _waitingButton()),
             ],
           );
         }
@@ -836,7 +862,8 @@ class _PreviewPageState extends State<PreviewPage> {
                 onPressed: () => _openCamera(removeLast: false),
               ),
               if (pending)
-                _waitingButton()
+                // Same narrow-screen squeeze as the waiting row above.
+                Flexible(child: _waitingButton())
               else if (_readyShots.isNotEmpty)
                 _filled(
                   key: const Key('upload_all_button'),
