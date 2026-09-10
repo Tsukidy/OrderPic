@@ -112,13 +112,19 @@ An Upload all action MUST upload every shot in the session over a single
 SMB connection, track each shot's outcome individually, show progress as
 completed/total, and delete a shot's local file only after that shot's
 upload succeeds. A shot write that stalls MUST fail after a bounded
-write timeout rather than hanging indefinitely; a failed or timed-out
-shot's partial remote file is overwritten when the shot is retried. If
-any shot fails, the un-uploaded shots MUST remain in the session and a
-Retry action MUST upload only those remaining shots. After every shot
-succeeds, the flow MUST show a completion summary with a Scan next
-action and a More-for-this-order action that starts a fresh empty
-session for the same order number.
+write timeout rather than hanging indefinitely; a write timeout
+indicates the connection is dead — the remaining shots MUST be skipped
+immediately on that connection rather than each waiting out the timeout.
+After a connection-death abort, the uploader MUST automatically redial a
+fresh connection and resume the remaining shots, bounded to a small
+number of attempts with a short backoff and gated on progress (no tight
+retry loop while still disconnected); the manual Retry action remains
+and re-uploads remaining shots with a fresh connection. A failed or
+timed-out shot's partial remote file is overwritten when the shot is
+retried. If any shot fails, the un-uploaded shots MUST remain in the
+session. After every shot succeeds, the flow MUST show a completion
+summary with a Scan next action and a More-for-this-order action that
+starts a fresh empty session for the same order number.
 
 #### Scenario: Successful batch uploads and cleans up
 
