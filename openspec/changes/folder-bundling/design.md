@@ -162,18 +162,41 @@ side consumes the share contents.
   vanish or be overwritten mid-batch); app-documents storage (needs
   `path_provider` dependency for no benefit — these are transient files).
 
-### D9: Batch upload — one connection, per-shot results, retry-remaining
+### D9: Batch upload — one connection, per-shot results, in-place retry + no broken files
 
 - **Choice**: `uploadSession()` opens one SMB connection; creates
   `sharePath` then `{sharePath}/{order}` best-effort (folders on); writes
   each shot sequentially; tracks per-shot ok/fail; deletes each local file
   on its own success; reports progress "x / N". Failure leaves the
   un-uploaded shots in the session — Retry re-runs only those.
+- **Addendum (6.10, from the 6.1 device re-pass)**: the round-based
+  auto-retry (3s/8s redial rounds) always raced a window it could not win
+  — when a write times out because the TCP connection died, the server
+  keeps the dead session's open handle on the half-written file until its
+  own keepalive reaps it (observed ~1–2 min on Windows; nothing
+  client-side can release it sooner — `SmbConnect.close()` is a graceful
+  FIN behind the transport's send mutex, and there is no `destroy()`).
+  The operator-approved policy instead: a failed shot is retried ONCE in
+  place before the batch moves on (fresh redial after a write timeout,
+  same connection for a server-answered error); still-failed shots get
+  one end-of-pass re-attempt; a final failure probes and DELETES the
+  broken remote partial so the share never keeps a half-written image —
+  and when the server refuses that delete (the lock window), the shot's
+  error says so plainly instead of surfacing a raw "file in use".
+  Bounds are preserved: two write timeouts with no success between them,
+  or a redial that cannot come up, abort the pass with instant
+  skip-marks (no serial 30s grinds). Abandoned write/close futures no
+  longer leak unhandled zone errors (`_bounded` awaits with a done-guard;
+  `Future.timeout` drops late source errors into the zone — the device
+  log's `Bad state: StreamSink is closed` spam).
 - **Rationale**: SMB has no multi-file transaction, so isolation granularity
   is the file; an operator should never re-shoot because one write failed.
 - **Alternatives considered**: all-or-nothing semantics (impossible without
   a transaction; would force full re-upload on any single failure);
-  per-shot connections (N× handshake latency for zero benefit).
+  per-shot connections (N× handshake latency for zero benefit); round-based
+  redial/resume (superseded — the skipped shots resume fast enough via the
+  in-place retry, and the timed-out shot itself cannot win a sub-minute
+  race against the server's session reaping).
 
 ### D10: History — drill-down with native folder detection
 

@@ -109,22 +109,32 @@ capture session.
 ### Requirement: Batch upload semantics
 
 An Upload all action MUST upload every shot in the session over a single
-SMB connection, track each shot's outcome individually, show progress as
-completed/total, and delete a shot's local file only after that shot's
-upload succeeds. A shot write that stalls MUST fail after a bounded
-write timeout rather than hanging indefinitely; a write timeout
-indicates the connection is dead — the remaining shots MUST be skipped
-immediately on that connection rather than each waiting out the timeout.
-After a connection-death abort, the uploader MUST automatically redial a
-fresh connection and resume the remaining shots, bounded to a small
-number of attempts with a short backoff and gated on progress (no tight
-retry loop while still disconnected); the manual Retry action remains
-and re-uploads remaining shots with a fresh connection. A failed or
-timed-out shot's partial remote file is overwritten when the shot is
-retried. If any shot fails, the un-uploaded shots MUST remain in the
-session. After every shot succeeds, the flow MUST show a completion
-summary with a Scan next action and a More-for-this-order action that
-starts a fresh empty session for the same order number.
+SMB connection while it stays healthy, track each shot's outcome
+individually, show progress as completed/total, and delete a shot's local
+file only after that shot's upload succeeds. A shot write that stalls
+MUST fail after a bounded write timeout rather than hanging indefinitely.
+
+Retry policy: a shot whose write fails MUST be retried once in place —
+on the same connection for a server-returned error, or on a freshly
+redialed connection when the failure was a write timeout (the old
+connection is dead) — before the batch moves on to the next shot. After
+the pass over all shots, every still-failed shot MUST get one final
+re-attempt; if that also fails, the uploader MUST probe the shot's
+remote target and delete any partial file it finds, so the share never
+retains a broken image. When the server refuses that delete — a dead
+session's open handle keeps the partial file locked until the server
+reaps it, typically a minute or two — the shot's error MUST say so
+rather than surfacing the raw refusal.
+
+Bounds: two write timeouts with no successful write between them, or a
+redial that cannot come up, MUST abort the pass — every unattempted shot
+is skip-marked immediately rather than each waiting out its own timeout.
+The manual Retry action remains: failed, timed-out, and skipped shots
+stay staged locally and re-upload with a fresh connection. If any shot
+fails, the un-uploaded shots MUST remain in the session. After every
+shot succeeds, the flow MUST show a completion summary with a Scan next
+action and a More-for-this-order action that starts a fresh empty
+session for the same order number.
 
 #### Scenario: Successful batch uploads and cleans up
 
@@ -139,13 +149,27 @@ starts a fresh empty session for the same order number.
   second and third shots remain locally, and Retry uploads exactly those
   two
 
-#### Scenario: Stalled write times out into the failure path
+#### Scenario: Stalled write is retried in place before the batch moves on
 
-- **WHEN** the network drops mid-write and a shot's upload makes no
-  progress
-- **THEN** that shot fails after the write timeout, later shots still get
-  their outcomes, and Retry re-uploads the failed shot (overwriting any
-  partial file) once connectivity returns
+- **WHEN** the network drops under a shot's write and the write times out
+- **THEN** the uploader closes the dead connection, redials a fresh one,
+  and retries that same shot before uploading the later shots
+
+#### Scenario: Final failure never leaves a broken remote file
+
+- **WHEN** a shot fails its write, its in-place retry, and the end-of-pass
+  re-attempt, and a partial file exists on the share
+- **THEN** the partial file is deleted from the share, the shot stays
+  staged locally, and its error states the partial copy was removed (or
+  that the server briefly still holds it, when the delete is refused)
+
+#### Scenario: A dead network aborts without serial timeouts
+
+- **WHEN** two consecutive writes time out with no successful write
+  between them, or a redial cannot come up
+- **THEN** the remaining shots are skip-marked without further write
+  attempts, all shots stay staged locally, and the manual Retry uploads
+  them once connectivity returns
 
 ---
 
