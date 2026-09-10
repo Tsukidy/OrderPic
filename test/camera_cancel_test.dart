@@ -9,6 +9,7 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:orderpic/capture/session.dart';
 import 'package:orderpic/pages/camera_page.dart';
 import 'package:orderpic/pages/scanner_page.dart';
+import 'package:orderpic/route_observer.dart';
 import 'package:orderpic/settings/app_settings.dart';
 
 /// Everything this file creates under Directory.systemTemp.
@@ -125,6 +126,9 @@ class _FakeScannerPlatform extends MobileScannerPlatform {
 Future<void> _pumpScanner(WidgetTester tester) async {
   await tester.pumpWidget(
     MaterialApp(
+      // Production registers the shared observer (main.dart) — the
+      // scanner's covered-route tracking depends on it.
+      navigatorObservers: [routeObserver],
       home: ScannerPage(
         settingsNotifier: ValueNotifier(AppSettings.defaults),
       ),
@@ -151,6 +155,41 @@ void main() {
       } catch (_) {/* test cleanup only */}
     }
     _created.clear();
+  });
+
+  testWidgets('a detection arriving while another route covers the scanner '
+      'is ignored (multi-photo flow: returning from the system camera '
+      'restarts the scanner camera underneath)', (tester) async {
+    await _pumpScanner(tester);
+    // Grab the callback BEFORE the covering route settles — an opaque route
+    // unmounts the covered scanner from the element tree (on device the
+    // camera restart still feeds it detections via the controller stream).
+    final onDetect = _onDetectOf(tester);
+    final nav = tester.state<NavigatorState>(find.byType(Navigator).first);
+    unawaited(
+      nav.push(
+        MaterialPageRoute<void>(
+          builder: (_) =>
+              const Scaffold(body: Center(child: Text('COVERING PAGE'))),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    unawaited(
+      Future.sync(
+        () => onDetect(
+          const BarcodeCapture(barcodes: [Barcode(rawValue: '100438')]),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pumpAndSettle();
+
+    expect(find.text('QR code scanned'), findsNothing,
+        reason: 'no QR dialog while the capture flow covers the scanner');
+    expect(find.text('COVERING PAGE'), findsOneWidget,
+        reason: 'the covering route stays top-most — nothing was pushed');
   });
 
   testWidgets('scanned QR → camera in flight; backing out of the system '

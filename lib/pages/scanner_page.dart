@@ -28,12 +28,31 @@ class ScannerPage extends StatefulWidget {
   State<ScannerPage> createState() => _ScannerPageState();
 }
 
-class _ScannerPageState extends State<ScannerPage> with RouteAware {
+class _ScannerPageState extends State<ScannerPage>
+    with RouteAware, WidgetsBindingObserver {
   final MobileScannerController _controller = MobileScannerController(
     detectionSpeed: DetectionSpeed.noDuplicates,
   );
   final TextEditingController _entryController = TextEditingController();
   bool _processing = false;
+
+  /// True while a page route covers the shell (set by [didPushNext], cleared
+  /// by [didPopNext]). Lookup-free by design: a covered route's subtree can
+  /// be deactivated, where inherited-widget lookups like ModalRoute.of would
+  /// throw — and `pushReplacement` between capture stages never re-fires
+  /// didPushNext, which keeps this correctly true through the whole
+  /// multi-photo loop.
+  bool _covered = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // The PAGE owns lifecycle handling (see [didChangeAppLifecycleState]):
+    // the MobileScanner widget's own handler restarts the camera on every
+    // app resume — including the resume from the system camera mid-capture
+    // flow, which would set the scanner scanning under the covered shell.
+    WidgetsBinding.instance.addObserver(this);
+  }
 
   // RouteAware: the camera must also stop while a route is pushed over the
   // tab shell (Settings, the capture flow) — `paused` only covers tab
@@ -49,6 +68,28 @@ class _ScannerPageState extends State<ScannerPage> with RouteAware {
     // ModalRoute.of returns ModalRoute<Object?>; this page only ever lives
     // under the shell's MaterialPageRoute, so the downcast is safe.
     routeObserver.subscribe(this, ModalRoute.of(context) as PageRoute);
+  }
+
+  /// App resume must NOT blindly restart the camera: coming back from the
+  /// system camera (mid capture flow) resumes the app while a route still
+  /// covers the scanner — starting there re-arms QR detection under the
+  /// flow. Only a scanner that is actually on screen resumes.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (!mounted) return;
+    switch (state) {
+      case AppLifecycleState.resumed:
+        if (!widget.paused && !_processing && !_covered) {
+          unawaited(_controller.start());
+        }
+      case AppLifecycleState.paused:
+        unawaited(_controller.stop());
+      case AppLifecycleState.detached:
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.inactive:
+        break;
+    }
   }
 
   @override
@@ -67,6 +108,7 @@ class _ScannerPageState extends State<ScannerPage> with RouteAware {
   /// in `_onDetect`.
   @override
   void didPushNext() {
+    _covered = true;
     unawaited(_controller.stop());
   }
 
@@ -77,6 +119,7 @@ class _ScannerPageState extends State<ScannerPage> with RouteAware {
   /// here as well would race it (`start()` throws if a start is pending).
   @override
   void didPopNext() {
+    _covered = false;
     if (!widget.paused && !_processing) {
       unawaited(_controller.start());
     }
@@ -84,6 +127,7 @@ class _ScannerPageState extends State<ScannerPage> with RouteAware {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     routeObserver.unsubscribe(this);
     _controller.dispose();
     _entryController.dispose();
@@ -91,6 +135,12 @@ class _ScannerPageState extends State<ScannerPage> with RouteAware {
   }
 
   Future<void> _onDetect(BarcodeCapture capture) async {
+    // A detection is only ours to handle when the scanner is the page on
+    // screen. The camera can restart underneath a covering route (the
+    // app-resume path from the system camera — see
+    // [didChangeAppLifecycleState]); a detection from such a restart must
+    // never open the QR dialog over the capture flow.
+    if (!mounted || widget.paused || _covered) return;
     if (_processing || capture.barcodes.isEmpty) return;
     final orderNumber = capture.barcodes.first.rawValue;
     if (orderNumber == null || orderNumber.isEmpty) return;
@@ -245,6 +295,9 @@ class _ScannerPageState extends State<ScannerPage> with RouteAware {
           MobileScanner(
             controller: _controller,
             onDetect: _onDetect,
+            // Lifecycle is handled by THIS page route-awarely; the widget's
+            // own handler would restart the camera on every app resume.
+            useAppLifecycleState: false,
             errorBuilder: (context, error) => Center(
               child: Padding(
                 padding: const EdgeInsets.all(24),
