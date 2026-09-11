@@ -35,7 +35,9 @@ reading as "pushed to the top" on the review screen) is **resolved as task
 6.13**: the full-screen image now fills the visible band between the
 thumbnail strip and the bottom controls instead of centering on the whole
 screen behind the overlays. Unit-verified with a real 160×90 landscape PNG
-(146/146); visual confirmation rides on the operator's next device pass.
+(146/146). The residual on-device sighting was identified as the SYSTEM
+camera's own confirmation screen (its checkmark UI — not app-rendered);
+the operator confirmed our review screen works.
 
 ---
 
@@ -99,19 +101,13 @@ task row (6.4–6.12).
 
 ## Overall Decision
 
-- [ ] ✅ PASS — 可進入 finishing-a-development-branch 與 archive
-- [x] ⚠️ PASS WITH WARNINGS — 可進入後續步驟但需注意：one open cosmetic
-  device finding (landscape image intermittently top-pushed on an
-  unidentified screen; all three image surfaces are tight-constrained by
-  construction — pending the operator's localization input before any fix
-  is attempted, tracked as session task #5; NOT recorded as a change task
-  until confirmed real)
+- [x] ✅ PASS — 可進入 finishing-a-development-branch 與 archive
+- [ ] ⚠️ PASS WITH WARNINGS — 可進入後續步驟但需注意：`<說明>`
 - [ ] ❌ FAIL — 返回失敗的 artifact 修正後重跑 verify
 
 **下一步**：
 
-1. Operator answers WHERE the landscape image appears top-pushed (review
-   screen right after capture vs History viewer; a screenshot settles it).
-   If real → 6.13 task + fix; if not reproducible → close.
-2. `/opsx:archive` (syncs the six capabilities into main specs, fixes the
-   placeholder Purpose) once the finding is dispositioned.
+All findings dispositioned (6.13 closed: residual sighting was the system
+camera's own confirm screen). Proceed to the retrospective artifact, then
+`/opsx:archive` (syncs the six capabilities into main specs, fixes the
+placeholder Purpose) and the branch merge.
