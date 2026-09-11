@@ -1,7 +1,7 @@
 # manual-order-entry Specification
 
 ## Purpose
-TBD - created by archiving change ordernumber-entry. Update Purpose after archive.
+Starting a capture by typing an order number when the QR code won't scan, flowing into the same camera → review → upload path and filename contract as a scanned code.
 
 ## Requirements
 
@@ -111,13 +111,22 @@ resume when the flow completes.
 ### Requirement: Upload naming contract preserved
 
 An upload started from a manually entered order number MUST produce a file
-named per the existing contract
-`{OrderNumber}_{YYYYMMDD}_{HHMMSS}.jpg`, which History can parse into order
-number and readable date/time.
+named per the capture-time filename scheme
+`{OrderNumber}_{YYYYMMDD}_{HHMMSS}_{NNN}.jpg|.png` — timestamped when the
+shot is admitted, indexed within the capture session, with the extension
+following the configured image format — which History can parse into order
+number and readable date/time (see the photo-naming capability).
 
 #### Scenario: Manually entered order produces a parseable filename
 
 - **WHEN** an upload for manually entered order `100438` completes
 - **THEN** the share contains a file matching
-  `100438_{YYYYMMDD}_{HHMMSS}.jpg` and the History tab lists it with order
-  number `100438` and a readable date/time
+  `100438_{YYYYMMDD}_{HHMMSS}_{NNN}.jpg|.png` and the History tab lists it
+  with order number `100438` and a readable date/time
+
+#### Scenario: A second manual-entry shot of the same order indexes onward
+
+- **WHEN** the operator starts another capture for manually entered order
+  `100438` and uploads one shot from that new session
+- **THEN** that shot's filename carries its own session's index (001),
+  distinct timestamp, and does not overwrite the earlier file
