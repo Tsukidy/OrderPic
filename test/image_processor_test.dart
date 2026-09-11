@@ -117,12 +117,41 @@ void main() {
     });
   });
 
-  group('NativeImageProcessor (JPEG branch only — no platform channels)',
-      () {
-    test('copies the already-encoded JPEG to the reserved path', () async {
+  group('isJpegBytes (the extension-contract sniff)', () {
+    test('true iff the head opens with the JPEG magic FF D8', () {
+      expect(isJpegBytes(const [0xFF, 0xD8, 0xFF, 0xE0]), isTrue);
+    });
+
+    test('false for PNG, HEIC-brand, short, and empty heads', () {
+      expect(isJpegBytes(const [0x89, 0x50, 0x4E, 0x47]), isFalse,
+          reason: 'PNG magic');
+      expect(
+        isJpegBytes(const [
+          0x00, 0x00, 0x00, 0x18, //
+          0x66, 0x74, 0x79, 0x70, // "ftyp"
+          0x68, 0x65, 0x69, 0x63, // "heic"
+        ]),
+        isFalse,
+        reason: 'a HEIC container brands itself at bytes 4..7 — it does not '
+            'open with FF D8, so it is not a JPEG',
+      );
+      expect(isJpegBytes(const [0xFF]), isFalse,
+          reason: 'too short to decide');
+      expect(isJpegBytes(const <int>[]), isFalse, reason: 'no bytes at all');
+    });
+  });
+
+  group('NativeImageProcessor (JPEG branch only — no platform channels: the '
+      'sniff and the copy are host-tested; the re-encode call is '
+      'device-only)', () {
+    test('a JPEG-headed source copies byte-for-byte to the reserved path '
+        '(the sniff must not alter the real-JPEG path)', () async {
       final session = await CaptureSession.create('100438');
       _created.add(session.dir);
-      final picked = _picked(_plant('mmcpic-pick-src').path, 'IMG_0001.jpg');
+      // JPEG-headed but not decodable — the copy branch never decodes; the
+      // magic bytes alone decide which branch runs.
+      final picked = File('${_plant('mmcpic-pick-src').path}/IMG_0001.jpg')
+        ..writeAsBytesSync(const [0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3]);
       final dest =
           '${session.dir.path}/${reserveShotName(session, UploadPrefs.defaults)}';
 
@@ -132,7 +161,8 @@ void main() {
       );
 
       expect(dest, matches(RegExp(r'_001\.jpg$')));
-      expect(File(dest).readAsBytesSync(), picked.readAsBytesSync());
+      expect(File(dest).readAsBytesSync(), picked.readAsBytesSync(),
+          reason: 'a genuine JPEG source passes through untouched');
     });
   });
 

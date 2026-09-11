@@ -40,11 +40,22 @@ abstract class ImageProcessor {
   Future<void> process({required String pickedPath, required String destPath});
 }
 
-/// The production processor. JPEG needs no codec here — quality/edge caps
-/// were already applied at pick time (or [JpegQuality.original] means the
-/// camera's bytes are correct as-is) — so it is a straight byte copy. PNG
-/// decodes the picked JPEG and re-encodes it losslessly (EXIF orientation
-/// baked in; PNG carries no EXIF).
+/// Does [head] open with the JPEG magic `FF D8`? A `.jpg` reserved name is
+/// a contract the file's bytes must honour — History's viewer and every
+/// SMB consumer assume the extension tells the truth. Camera picks always
+/// do, but a gallery pick can arrive as HEIC or another container under
+/// that name (pick-time compression is format-gated), so admission sniffs
+/// the leading bytes instead of trusting the extension. A head too short
+/// to carry the magic (including empty) is not a JPEG.
+bool isJpegBytes(List<int> head) =>
+    head.length >= 2 && head[0] == 0xFF && head[1] == 0xD8;
+
+/// The production processor. A `.png` dest decodes the picked file and
+/// re-encodes it losslessly (EXIF orientation baked in; PNG carries no
+/// EXIF). A `.jpg` dest is a straight byte copy when the bytes really are
+/// JPEG — quality/edge caps were already applied at pick time (or
+/// [JpegQuality.original] means the camera's bytes are correct as-is) —
+/// and a codec re-encode when they are not ([isJpegBytes] says which).
 class NativeImageProcessor implements ImageProcessor {
   const NativeImageProcessor();
 
@@ -74,11 +85,37 @@ class NativeImageProcessor implements ImageProcessor {
       return;
     }
 
-    // JPEG: the bytes are already correct — same copy as the test seam.
-    await const CopyOnlyProcessor().process(
-      pickedPath: pickedPath,
-      destPath: destPath,
+    // `.jpg` dest: sniff before trusting the extension. Reading the first
+    // 3 bytes is enough for the FF D8 magic and costs nothing next to a
+    // decode.
+    final head = await File(pickedPath)
+        .openRead(0, 3)
+        .fold<List<int>>(<int>[], (acc, chunk) => acc..addAll(chunk));
+    if (isJpegBytes(head)) {
+      // Genuine JPEG: the bytes are already correct — same copy as the
+      // test seam.
+      await const CopyOnlyProcessor().process(
+        pickedPath: pickedPath,
+        destPath: destPath,
+      );
+      return;
+    }
+
+    // Non-JPEG bytes under a `.jpg` name (a gallery HEIC pick, say):
+    // re-encode to real JPEG — full size, max quality — so the file
+    // matches the extension's contract. The `minWidth`/`minHeight`
+    // sentinel means native size, exactly as the PNG branch above.
+    final bytes = await FlutterImageCompress.compressWithFile(
+      pickedPath,
+      minWidth: _fullSizeEdge,
+      minHeight: _fullSizeEdge,
+      format: CompressFormat.jpeg,
+      quality: 100,
     );
+    if (bytes == null || bytes.isEmpty) {
+      throw Exception('JPEG re-encode produced no data for $pickedPath');
+    }
+    await File(destPath).writeAsBytes(bytes, flush: true);
   }
 }
 
