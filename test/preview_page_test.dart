@@ -721,13 +721,18 @@ void main() {
     // WHERE the next photos come from first (design D4). The choice is a
     // bottom sheet, NOT a new button in an action row: the narrow-screen
     // contract keeps those rows at Retake / Add photo / the gated or upload
-    // button, and a 360dp screen has no room for a fourth sibling. Opening
-    // the sheet must change nothing and navigate nowhere; DISMISSING it
-    // (barrier tap, back gesture) is a full no-op; only a made choice may
-    // disarm the gate, reset the selection and push.
+    // button, and a 360dp screen has no room for a fourth sibling.
+    //
+    // Disarm timing (controller ruling): the armed upload gate is cancelled
+    // the moment the sheet OPENS — today's Add photo already cancels it on
+    // tap, so this is the same disarm one step earlier — because a
+    // conversion settling mid-sheet must never auto-start an upload behind
+    // it. What the sheet round-trip must NOT do is navigate, stage, drop,
+    // or reset the pinned selection; a dismissal leaves the page exactly as
+    // the disarm left it.
 
-    testWidgets('Add photo opens the sheet in place: no navigation, no '
-        'state change', (tester) async {
+    testWidgets('Add photo opens the sheet in place: no navigation, '
+        'nothing staged or dropped', (tester) async {
       final session = await _real(tester, () => _sessionOf('100438', 2));
       final shots = session.shots.toList();
       // Scriptless on purpose: if the sheet round-trip launched anything,
@@ -864,16 +869,19 @@ void main() {
       }
     });
 
-    testWidgets('dismissing the sheet is a full no-op: the armed upload '
-        'gate survives, selection and batch untouched', (tester) async {
+    testWidgets('opening the sheet cancels the armed gate: a conversion '
+        'settling mid-sheet never uploads; dismissing leaves the page idle, '
+        'batch and selection untouched', (tester) async {
       final session = await _real(tester, () => _sessionOf('100438', 1));
       final ready = session.shots.single;
       final gate = Completer<void>();
       final picked = await _real(tester, () => _pickedFile('IMG_0002.jpg'));
 
-      // A pending conversion plus an ARMED gate — the state in which a
-      // stray disarm would silently kill the auto-upload the operator
-      // already asked for (the settle would find nobody waiting).
+      // A pending conversion plus an ARMED gate: the operator asked for the
+      // upload to start the moment the conversion settles. Opening the sheet
+      // cancels that wait — today's Add photo cancels it on tap, the sheet
+      // just moves the disarm one step earlier — so the settle below (while
+      // the sheet is still up) must find NOBODY waiting.
       final admission = admitPicked(
         pickedPath: picked.path,
         prefs: _settings(batch: true).upload,
@@ -895,7 +903,7 @@ void main() {
       );
 
       // Pin the FIRST thumbnail: the selection is review-time state whose
-      // survival across the dismissal is part of the no-op contract.
+      // survival across the sheet round-trip is part of the contract.
       final stripTiles = find.descendant(
         of: find.byKey(const Key('thumb_strip')),
         matching: find.byType(GestureDetector),
@@ -904,20 +912,35 @@ void main() {
       await tester.pump();
       expect(_fullScreenFile(tester).path, ready.localPath);
 
-      // Arm the gate: the operator asked for the upload to start the moment
-      // the pending conversion settles — exactly what a stray disarm during
-      // the sheet round-trip would silently kill.
+      // Arm the gate...
       await tester.tap(find.byKey(const Key('waiting_button')));
       await tester.pump();
+      expect(find.text('Waiting… (1)'), findsOneWidget);
 
+      // ...and open the sheet, which is where the armed wait is cancelled.
       await tester.tap(find.byKey(const Key('add_photo_button')));
       // Plain pumps, not pumpAndSettle: the pending tile's spinner never
       // settles while the conversion is held open.
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400)); // sheet transition
       expect(find.byKey(const Key('source_sheet')), findsOneWidget);
-      expect(find.text('Waiting… (1)'), findsOneWidget,
-          reason: 'the gate stays armed while the sheet is open');
+
+      // The settle fires WHILE the sheet is up. This is the ruling's pin:
+      // the disarm already happened at open, so the settle auto-starts
+      // nothing — no uploader call, no upload pass, no done banner behind
+      // the sheet (had the gate survived, _onSessionChanged would have
+      // uploaded here).
+      gate.complete();
+      await _ioSettle(
+        tester,
+        () => session.shots.length == 2 &&
+            session.shots.every((s) => s.status == ShotStatus.ready),
+      );
+      expect(fake.sessions, isEmpty,
+          reason: 'the armed wait was cancelled at sheet-open — a settle '
+              'behind the sheet must never auto-start the upload');
+      expect(find.text('Uploaded 2 photos'), findsNothing);
+      expect(find.text('Uploading 0 / 2'), findsNothing);
 
       // Barrier tap = dismissal: the sheet answers null.
       await tester.tapAt(const Offset(20, 20));
@@ -928,22 +951,18 @@ void main() {
       expect(find.byType(PreviewPage), findsOneWidget);
       expect(find.byType(CameraPage), findsNothing);
       expect(nav.replaces, 0, reason: 'a dismissal navigates nowhere');
-      expect(find.text('Waiting… (1)'), findsOneWidget,
-          reason: 'the gate was NOT disarmed by the sheet round-trip');
+      // Disarmed AND settled: the row is back to plain idle — Upload all,
+      // not the armed Waiting button.
+      expect(find.byKey(const Key('upload_all_button')), findsOneWidget,
+          reason: 'the sheet round-trip left the page idle (the armed wait '
+              'was cancelled at open), everything ready to upload');
+      expect(find.text('Waiting… (1)'), findsNothing);
+      expect(fake.sessions, isEmpty, reason: 'still no upload ran');
       expect(_fullScreenFile(tester).path, ready.localPath,
           reason: 'the pinned selection was not reset');
       expect(session.shots, hasLength(2),
           reason: 'nothing was staged or dropped by opening + dismissing');
-      expect(fake.sessions, isEmpty);
-
-      // And the armed gate still works: when the held conversion settles,
-      // the upload the operator armed must auto-start.
-      gate.complete();
-      await _ioSettle(
-        tester,
-        () => find.text('Uploaded 2 photos').evaluate().isNotEmpty,
-      );
-      expect(fake.sessions, [session]);
+      expect(File(session.shots[1].localPath).existsSync(), isTrue);
     });
   });
 

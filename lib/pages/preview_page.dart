@@ -226,9 +226,8 @@ class _PreviewPageState extends State<PreviewPage> {
   /// D10: retake is camera-only). [removeLast] drops the newest shot and
   /// deletes its file — that shot never happened, [CaptureSession.nextIndex]
   /// rolls back with it — so the session survives and the numbering keeps
-  /// accumulating. Add photo goes through [_pickSource] instead (source
-  /// choice first); its same-session leg repeats the disarm-and-push shape
-  /// below once a source was actually chosen.
+  /// accumulating. Add photo goes through [_pickSource] instead, which
+  /// performs this same disarm the moment its sheet opens.
   ///
   /// Retaking a PENDING last shot is the cancel path: the entry goes now
   /// and the in-flight conversion cleans up after itself when it finds its
@@ -258,31 +257,36 @@ class _PreviewPageState extends State<PreviewPage> {
   /// gated or upload button, and a 360dp screen has no room for a fourth
   /// sibling (documented row overflow, see [_bottomButtons]).
   ///
-  /// Opening the sheet changes nothing and navigates nowhere; DISMISSING it
-  /// (barrier tap, back gesture) is a full no-op — the armed upload gate
-  /// stays armed and the pinned thumbnail stays pinned. So the state changes
-  /// below happen only once a choice was made, at the moment navigation
-  /// actually happens — never while the sheet is merely open.
+  /// The armed upload gate is disarmed HERE, at sheet-open — the same
+  /// disarm [_openCamera] performs for Retake, one step earlier than the
+  /// add-photo push did. Waiting behind the sheet is not an option: a
+  /// conversion settling mid-sheet would auto-start the upload under the
+  /// sheet, and the eventual choice would then push the camera over an
+  /// in-flight pass (whose dir reclaim could break the new admissions). A
+  /// dismissal therefore leaves the gate disarmed — Upload all is back in
+  /// the row once the pending shots settle — which is today's Add-photo
+  /// contract, just one tap earlier; it still navigates nowhere and touches
+  /// neither the batch nor the pinned selection.
   ///
   /// [freshSession] is Task 4.2's leg: the done-state continuations (More
   /// for this order / Another photo (same order)) will come through here
   /// and start a brand-new session with the chosen source. No caller
   /// reaches that branch yet.
   Future<void> _pickSource({required bool freshSession}) async {
+    if (_status == _UploadStatus.waiting) _status = _UploadStatus.idle;
     final source = await showModalBottomSheet<CaptureSource>(
       context: context,
       builder: _sourceSheet,
     );
-    // Null = dismissed: nothing at all happens.
+    // Null = dismissed: no navigation, nothing staged or dropped.
     if (source == null || !mounted) return;
     if (freshSession) {
       // Task 4.2 turns this branch on (CaptureSession.create + push with
       // [source]); deliberately inert today — nothing calls it.
       return;
     }
-    // Same-session Add photo: the exact state [_openCamera] leaves behind
-    // for its push, applied now that a source was actually chosen.
-    if (_status == _UploadStatus.waiting) _status = _UploadStatus.idle;
+    // Same-session Add photo. The selection is review-time state only:
+    // coming back from the camera should present the newly admitted shot.
     _selectedIndex = null;
     await _pushCamera(source);
   }
