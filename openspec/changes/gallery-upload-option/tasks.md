@@ -6,7 +6,7 @@
 
 ## 2. CameraPage as the one transient picker page (two sources)
 
-- [ ] 2.1 `CaptureSource { camera, gallery }` enum + `CameraPage.source` parameter (default camera, all existing call sites untouched); gallery mode calls `pickMultiImage` with the same `jpegPickParams` mapping (null params for PNG/Original), admits every returned file in order via `admitPicked`, then does the single `pushReplacement` to review; launch caption follows the source ("Opening camera…" / "Opening gallery…")
+- [x] 2.1 `CaptureSource { camera, gallery }` enum + `CameraPage.source` parameter (default camera, all existing call sites untouched); gallery mode calls `pickMultiImage` with the same `jpegPickParams` mapping (null params for PNG/Original), admits every returned file in order via `admitPicked`, then does the single `pushReplacement` to review; launch caption follows the source ("Opening camera…" / "Opening gallery…")
 - [ ] 2.2 Cancel/throw semantics for the multi-picker: empty list OR null → today's cancel path (`_exit`: staged → review, empty → cleanup + pop to Scan tab); picker exception → `_abandon` snackbar + two-way exit; widget tests via the `ImagePickerPlatform` seam — extend the fake with a multi-pick method returning a canned list / empty list / thrower; cover staged-session cancel, empty-session cancel, crash abandon, and 3-pick admission ordering (001/002/003)
 
 ## 3. Capture-start source choice (scanner dialogs)
