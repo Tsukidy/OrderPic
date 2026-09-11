@@ -2,7 +2,7 @@
 
 ## 1. Format-safety guard (processor core, no UI)
 
-- [ ] 1.1 JPEG magic-byte guard in `NativeImageProcessor`: when the reserved name ends `.jpg` and the source's leading bytes are not `FF D8`, re-encode to JPEG (full-size sentinel, quality 100) and write those bytes; JPEG sources and `.png` destinations keep today's exact behavior; unit tests in `test/image_processor_test.dart` — copy path unchanged for JPEG bytes, re-encode path invoked (fake the compress call or test the sniff helper) for HEIC-magic bytes, failure thrown into the existing flagged-retake contract (`flutter analyze` + `flutter test` green)
+- [x] 1.1 JPEG magic-byte guard in `NativeImageProcessor`: when the reserved name ends `.jpg` and the source's leading bytes are not `FF D8`, re-encode to JPEG (full-size sentinel, quality 100) and write those bytes; JPEG sources and `.png` destinations keep today's exact behavior; unit tests in `test/image_processor_test.dart` — copy path unchanged for JPEG bytes, re-encode path invoked (fake the compress call or test the sniff helper) for HEIC-magic bytes, failure thrown into the existing flagged-retake contract (`flutter analyze` + `flutter test` green)
 
 ## 2. CameraPage as the one transient picker page (two sources)
 
