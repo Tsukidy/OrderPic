@@ -92,6 +92,29 @@ Future<List<String>> _pickedFiles(List<String> names) async => [
   for (final name in names) (await _pickedFile(name)).path,
 ];
 
+/// The names of the live `mmcpic-session-<orderNumber>-*` dirs under the
+/// system temp — the "a session dir exists on disk" witness for the
+/// assertion that must NOT mint one (Task 4.2: a dismissed continuation
+/// must not create the fresh session's dir — it would leak until the
+/// startup sweep). Scoped to ONE order number, and that number must be
+/// unique across the whole test corpus: `flutter test` runs the test files
+/// CONCURRENTLY against the same shared system temp, so an unscoped listing
+/// sees other files' dirs appear and vanish mid-test (their orders differ,
+/// and capture_session_test's sweep group even deletes every session dir).
+/// Call through [_real]; assert on the DIFFERENCE against a snapshot taken
+/// before the action under test — only a dir this test's own page created
+/// can show up there.
+Future<Set<String>> _sessionDirNames(String orderNumber) async {
+  final prefix = '${CaptureSession.dirPrefix}$orderNumber-';
+  final names = <String>{};
+  await for (final e in Directory.systemTemp.list()) {
+    if (e is! Directory) continue;
+    final name = e.uri.pathSegments.where((s) => s.isNotEmpty).last;
+    if (name.startsWith(prefix)) names.add(name);
+  }
+  return names;
+}
+
 /// [format]/[jpegQuality] default to this file's working PNG shape; the
 /// gallery params test overrides them to pin the JPEG preset mapping.
 AppSettings _settings({
@@ -285,6 +308,11 @@ class _FakePickerPlatform extends ImagePickerPlatform {
   final List<_HeldPick> held = [];
   final List<_HeldMultiPick> heldMulti = [];
 
+  /// The source every single-pick call received — the witness that the
+  /// CAMERA leg (not the gallery) drove the seam (Task 4.2's done-state
+  /// continuation asserts exactly this).
+  final List<ImageSource> sources = [];
+
   /// The options every multi-pick call received — the pick-time params the
   /// page forwarded (the JPEG preset's quality/edge caps travel inside
   /// [MultiImagePickerOptions.imageOptions]).
@@ -298,6 +326,7 @@ class _FakePickerPlatform extends ImagePickerPlatform {
     required ImageSource source,
     ImagePickerOptions options = const ImagePickerOptions(),
   }) async {
+    sources.add(source);
     final String? path;
     if (_calls < pickedPaths.length) {
       path = pickedPaths[_calls];
@@ -587,15 +616,17 @@ void main() {
     });
 
     testWidgets('allOk done state: banner + next actions; More for this '
-        'order → fresh empty CameraPage for the same order',
-        (tester) async {
+        'order → sheet → fresh empty CameraPage (camera) for the same '
+        'order', (tester) async {
       final session = await _real(tester, () => _sessionOf('100438', 3));
       final fake = _FakeUploader()..next.add(_summary(session.shots));
+      final nav = _NavRecorder();
       await _pumpPreview(
         tester,
         session: session,
         batch: true,
         uploader: fake.call,
+        nav: nav,
       );
 
       await tester.tap(find.byKey(const Key('upload_all_button')));
@@ -609,12 +640,35 @@ void main() {
       expect(find.byKey(const Key('thumb_strip')), findsNothing,
           reason: 'done state hides the working-set chrome');
 
+      // Task 4.2 retarget: the continuation now asks WHERE first (the same
+      // sheet Add photo uses) — the camera here is the sheet's answer.
       await tester.tap(find.text('More for this order'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('source_sheet')), findsOneWidget,
+          reason: 'the choice is asked before anything is created');
+      expect(find.byType(CameraPage), findsNothing);
+
+      await tester.tap(find.byKey(const Key('sheet_take_photo')));
       await _ioSettle(
         tester,
         () => find.byType(CameraPage).evaluate().isNotEmpty,
       );
 
+      // The pushed page carries a FRESH session — the finished one is
+      // never reused (new dir, numbering restarted, still empty).
+      final pushed = tester.widget<CameraPage>(find.byType(CameraPage));
+      final fresh = pushed.session;
+      _created.add(fresh.dir);
+      expect(pushed.source, CaptureSource.camera,
+          reason: 'the sheet camera answer rides the plain camera leg');
+      expect(identical(fresh, session), isFalse,
+          reason: 'a brand-new session, not the one that just finished');
+      expect(fresh.dir.path, isNot(session.dir.path),
+          reason: 'the fresh session starts a NEW dir');
+      expect(fresh.shots, isEmpty,
+          reason: 'nothing was staged into it yet');
+      expect(nav.replaces, 1, reason: 'the continuation is one replace, '
+          'exactly what the old direct push did (plus the sheet question)');
       expect(find.text('Order: 100438'), findsOneWidget,
           reason: 'same order, brand-new session');
       expect(find.text('Opening camera…'), findsOneWidget,
@@ -963,6 +1017,231 @@ void main() {
       expect(session.shots, hasLength(2),
           reason: 'nothing was staged or dropped by opening + dismissing');
       expect(File(session.shots[1].localPath).existsSync(), isTrue);
+    });
+  });
+
+  group('PreviewPage done-state continuations via the source sheet', () {
+    // Task 4.2: the done rows' continuations ("More for this order" with
+    // the batch on, "Another photo (same order)" without) no longer jump
+    // straight to a fresh camera — they ask WHERE first, through the very
+    // same sheet Add photo uses (one shared path, no done-state fork; the
+    // gate disarm inside it is a harmless no-op here, the done state arms
+    // no gate). The choice precedes the session: the fresh CaptureSession
+    // (new dir, numbering restarted at 001) is minted only AFTER an answer,
+    // because CaptureSession.create creates the dir eagerly and a session
+    // minted for a dismissed question would sit in the system temp until
+    // the next launch's sweep. A dismissal is a full no-op: no session, no
+    // route, the done row intact for another try.
+
+    testWidgets('batch done: More for this order → sheet → gallery '
+        'multi-picks into a FRESH session whose numbering restarts at 001',
+        (tester) async {
+      final session = await _real(tester, () => _sessionOf('100438', 3));
+      final staged = session.shots.toList();
+      final fake = _FakeUploader()..next.add(_summary(staged));
+      final picked = await _real(
+        tester,
+        () => _pickedFiles(['IMG_A.jpg', 'IMG_B.jpg']),
+      );
+      // The gallery pick is HELD so the pushed page — and its fresh
+      // session — stays observable before the admissions run.
+      final picker = _FakePickerPlatform.gallery([
+        _FakePickerPlatform.heldMultiPick,
+      ]);
+      ImagePickerPlatform.instance = picker;
+      final nav = _NavRecorder();
+      await _pumpPreview(
+        tester,
+        session: session,
+        batch: true,
+        uploader: fake.call,
+        nav: nav,
+      );
+
+      await tester.tap(find.byKey(const Key('upload_all_button')));
+      await tester.pump();
+      expect(find.text('Uploaded 3 photos'), findsOneWidget);
+
+      await tester.tap(find.text('More for this order'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('source_sheet')), findsOneWidget);
+      expect(find.byType(CameraPage), findsNothing,
+          reason: 'the question comes before any launch');
+      expect(picker.multiOptions, isEmpty,
+          reason: 'the sheet alone picks nothing');
+
+      await tester.tap(find.byKey(const Key('sheet_gallery')));
+      await _ioSettle(
+        tester,
+        () => find.byType(CameraPage).evaluate().isNotEmpty,
+      );
+
+      // The answer launched the gallery — on a FRESH session, never the
+      // one that just finished.
+      final pushed = tester.widget<CameraPage>(find.byType(CameraPage));
+      final fresh = pushed.session;
+      _created.add(fresh.dir);
+      expect(pushed.source, CaptureSource.gallery);
+      expect(identical(fresh, session), isFalse,
+          reason: 'a brand-new session for the continued order');
+      expect(fresh.dir.path, isNot(session.dir.path),
+          reason: 'the fresh session starts a NEW dir');
+      expect(fresh.shots, isEmpty,
+          reason: 'nothing was staged into it before the pick returned');
+      expect(picker.multiOptions, hasLength(1),
+          reason: 'the choice fired exactly ONE multi-pick');
+      expect(find.text('Opening gallery…'), findsOneWidget);
+
+      // The gallery sheet comes back with two photos → both admitted into
+      // the FRESH session as 001/002 — continuing the finished session's
+      // three staged shots would have said 004/005.
+      picker.heldMulti.single.resolve(picked);
+      await _ioSettle(
+        tester,
+        () => find.byType(PreviewPage).evaluate().isNotEmpty &&
+            fresh.shots.length == 2 &&
+            fresh.shots.every((s) => s.status == ShotStatus.ready),
+      );
+      await tester.pumpAndSettle();
+
+      expect(fresh.shots[0].fileName, matches(RegExp(r'_001\.png$')),
+          reason: 'numbering RESTARTS at 001 in the fresh session');
+      expect(fresh.shots[1].fileName, matches(RegExp(r'_002\.png$')));
+      for (final s in fresh.shots) {
+        expect(File(s.localPath).existsSync(), isTrue,
+            reason: '${s.fileName} was converted into the fresh dir');
+      }
+      expect(session.shots, staged,
+          reason: 'the finished session is untouched — the picks joined '
+              'the fresh one, not it');
+      expect(find.text('Order: 100438 — 2 photos'), findsOneWidget,
+          reason: 'same order, fresh session (the review chip counts the '
+              'fresh session\'s own two shots)');
+    });
+
+    testWidgets('single-shot done: Another photo (same order) → sheet → '
+        'camera opens on a FRESH session', (tester) async {
+      final session = await _real(tester, () => _sessionOf('100438', 1));
+      final fake = _FakeUploader()..next.add(_summary(session.shots));
+      final picked = await _real(tester, () => _pickedFile('IMG_0002.jpg'));
+      // The camera pick is HELD so the pushed page stays observable; the
+      // single-pick seam firing (not the multi-pick one) is the witness
+      // that the CAMERA leg ran.
+      final picker = _FakePickerPlatform([_FakePickerPlatform.heldPick]);
+      ImagePickerPlatform.instance = picker;
+      final nav = _NavRecorder();
+      await _pumpPreview(
+        tester,
+        session: session,
+        batch: false,
+        uploader: fake.call,
+        nav: nav,
+      );
+
+      await tester.tap(find.text('Upload'));
+      await tester.pump();
+      expect(find.textContaining('Uploaded:'), findsOneWidget);
+
+      await tester.tap(find.text('Another photo\n(same order)'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('source_sheet')), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('sheet_take_photo')));
+      await _ioSettle(
+        tester,
+        () => find.byType(CameraPage).evaluate().isNotEmpty,
+      );
+
+      final pushed = tester.widget<CameraPage>(find.byType(CameraPage));
+      final fresh = pushed.session;
+      _created.add(fresh.dir);
+      expect(pushed.source, CaptureSource.camera);
+      expect(picker.sources.single, ImageSource.camera,
+          reason: 'the camera leg drives the single-pick seam with '
+              'ImageSource.camera');
+      expect(picker.multiOptions, isEmpty,
+          reason: 'no multi-pick fired — the sheet answer was the camera');
+      expect(identical(fresh, session), isFalse);
+      expect(fresh.dir.path, isNot(session.dir.path));
+      expect(fresh.shots, isEmpty, reason: 'a brand-new, still-empty session');
+      expect(find.text('Opening camera…'), findsOneWidget);
+
+      // The camera comes back with a photo → it lands in the FRESH session
+      // as 001 (a reuse of the finished session would have said 002).
+      picker.held.single.resolve(picked.path);
+      await _ioSettle(
+        tester,
+        () => find.byType(PreviewPage).evaluate().isNotEmpty &&
+            fresh.shots.length == 1 &&
+            fresh.shots.single.status == ShotStatus.ready,
+      );
+      await tester.pumpAndSettle();
+
+      expect(fresh.shots.single.fileName, matches(RegExp(r'_001\.png$')),
+          reason: 'numbering restarts in the fresh session');
+      expect(session.shots, hasLength(1),
+          reason: 'the finished session is untouched');
+    });
+
+    testWidgets('dismissing the sheet cancels the continuation: no route, '
+        'page stays done, NO session dir created', (tester) async {
+      // A corpus-unique order: the dir-count witness below keys on it, and
+      // concurrently-running test files must never mint dirs with it (see
+      // [_sessionDirNames]).
+      const order = '246813';
+      final session = await _real(tester, () => _sessionOf(order, 2));
+      final staged = session.shots.toList();
+      final fake = _FakeUploader()..next.add(_summary(staged));
+      // Scriptless on purpose: any launch would be answered "backed out" —
+      // visible below as a picker call.
+      final picker = _FakePickerPlatform([]);
+      ImagePickerPlatform.instance = picker;
+      final nav = _NavRecorder();
+      await _pumpPreview(
+        tester,
+        session: session,
+        batch: true,
+        uploader: fake.call,
+        nav: nav,
+      );
+
+      await tester.tap(find.byKey(const Key('upload_all_button')));
+      await tester.pump();
+      expect(find.text('Uploaded 2 photos'), findsOneWidget);
+
+      // The "no session minted" witness: this order's session dirs on
+      // disk, snapshotted before the tap.
+      final dirsBefore = await _real(tester, () => _sessionDirNames(order));
+
+      await tester.tap(find.text('More for this order'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('source_sheet')), findsOneWidget);
+      expect((await _real(tester, () => _sessionDirNames(order)))
+          .difference(dirsBefore), isEmpty,
+          reason: 'the sheet is only a QUESTION — the fresh session (and '
+              'its dir) does not exist before an answer');
+
+      // Barrier tap = dismissal: the sheet answers null.
+      await tester.tapAt(const Offset(20, 20));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(find.byKey(const Key('source_sheet')), findsNothing);
+      expect(find.byType(PreviewPage), findsOneWidget,
+          reason: 'the page never navigated');
+      expect(find.byType(CameraPage), findsNothing);
+      expect(nav.replaces, 0, reason: 'a dismissal navigates nowhere');
+      expect(find.text('Uploaded 2 photos'), findsOneWidget,
+          reason: 'still the same done state');
+      expect(find.text('More for this order'), findsOneWidget,
+          reason: 'the done row is intact — the operator may choose again');
+      expect((await _real(tester, () => _sessionDirNames(order)))
+          .difference(dirsBefore), isEmpty,
+          reason: 'the dismissed choice minted NO session dir — nothing '
+              'left to leak until the startup sweep');
+      expect(session.shots, staged, reason: 'nothing staged or dropped');
+      expect(picker.multiOptions, isEmpty);
+      expect(picker.sources, isEmpty, reason: 'no picker call ever fired');
     });
   });
 

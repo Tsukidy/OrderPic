@@ -268,27 +268,34 @@ class _PreviewPageState extends State<PreviewPage> {
   /// contract, just one tap earlier; it still navigates nowhere and touches
   /// neither the batch nor the pinned selection.
   ///
-  /// [freshSession] is Task 4.2's leg: the done-state continuations (More
-  /// for this order / Another photo (same order)) will come through here
-  /// and start a brand-new session with the chosen source. No caller
-  /// reaches that branch yet.
-  Future<void> _pickSource({required bool freshSession}) async {
+  /// [freshSession] marks the done-state continuations' leg ([_moreForThisOrder]):
+  /// they come through this same sheet and start a brand-new session with
+  /// the chosen source — the returned [CaptureSource] is that leg's
+  /// material. The session itself is deliberately NOT created here: the
+  /// caller must not mint one for a dismissed choice (see its comment).
+  ///
+  /// Returns the chosen source, or null when the sheet was dismissed (no
+  /// navigation, nothing staged or dropped). The same-session leg pushes
+  /// the camera itself and still returns the source for symmetry.
+  Future<CaptureSource?> _pickSource({required bool freshSession}) async {
     if (_status == _UploadStatus.waiting) _status = _UploadStatus.idle;
     final source = await showModalBottomSheet<CaptureSource>(
       context: context,
       builder: _sourceSheet,
     );
-    // Null = dismissed: no navigation, nothing staged or dropped.
-    if (source == null || !mounted) return;
+    // Null = dismissed: no navigation, nothing staged or dropped, no
+    // session minted (the fresh-session leg's caller sees the null too).
+    if (source == null || !mounted) return null;
     if (freshSession) {
-      // Task 4.2 turns this branch on (CaptureSession.create + push with
-      // [source]); deliberately inert today — nothing calls it.
-      return;
+      // The continuation's fresh session is minted by [_moreForThisOrder]
+      // — creation must follow the choice, never precede it.
+      return source;
     }
     // Same-session Add photo. The selection is review-time state only:
     // coming back from the camera should present the newly admitted shot.
     _selectedIndex = null;
     await _pushCamera(source);
+    return source;
   }
 
   /// The two answers the sheet offers. The labels are the operator-facing
@@ -361,7 +368,19 @@ class _PreviewPageState extends State<PreviewPage> {
   /// finished. Both 'More for this order' (batch on) and 'Another photo
   /// (same order)' (batch off) land here. Only reachable with no
   /// conversion failures staged (the done row swaps to retake-first then).
+  ///
+  /// The source choice comes FIRST: [_pickSource] is awaited before the
+  /// session exists, because [CaptureSession.create] mints its dir eagerly
+  /// — creating one for a then-dismissed choice would strand an empty
+  /// `mmcpic-session-*` dir in the system temp until the startup sweep
+  /// reclaims it (a leak the sweep exists for, not one to manufacture
+  /// here). Only an answer creates the session and pushes the camera page
+  /// with that source. The disarm inside [_pickSource] is a harmless no-op
+  /// on this path (the done state arms no gate) — same call shape as Add
+  /// photo, no done-state fork.
   Future<void> _moreForThisOrder() async {
+    final source = await _pickSource(freshSession: true);
+    if (source == null || !mounted) return;
     final session = await CaptureSession.create(widget.session.orderNumber);
     if (!mounted) return;
     await Navigator.of(context).pushReplacement(
@@ -370,6 +389,7 @@ class _PreviewPageState extends State<PreviewPage> {
           session: session,
           settingsNotifier: widget.settingsNotifier,
           processor: widget.processor,
+          source: source,
         ),
       ),
     );
