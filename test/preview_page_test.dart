@@ -1637,6 +1637,207 @@ void main() {
     });
   });
 
+  group('PreviewPage batch OFF with a multi-pick session (Task 4.3)', () {
+    // The state under test is the one production reaches with the toggle
+    // OFF: a capture-start gallery multi-pick (the leg the "batch OFF runs
+    // the SAME gallery path" suite pinned as ungated) hands THREE staged
+    // shots to the ordinary review page. What is new here is the REVIEW
+    // side of that state: the single-shot presentation must not grow batch
+    // chrome just because the session holds several shots, and the
+    // ordinary Retake / Upload controls must already carry the multi-pick
+    // semantics — drop the newest only, upload every READY shot.
+    //
+    // Staging: the presentation suite arrives through the REAL capture path
+    // (CameraPage + the gallery fake), never behind the page's back. The
+    // retake and upload suites stage directly via [_sessionOf] — the file's
+    // established batch-off pattern — because their witnesses ride
+    // PreviewPage-only seams (the injected processor that must survive the
+    // retake round trip; the injected uploader), and the CameraPage
+    // hand-off builds its own review page with the production defaults.
+
+    /// The capture-start staging of the presentation suite: a fresh
+    /// session, a 3-file multi-pick, batch OFF — through the real
+    /// CameraPage path, ending on the review page with three READY shots.
+    Future<CaptureSession> stagedByGallery(
+      WidgetTester tester,
+      String order,
+    ) async {
+      final session = await _real(tester, () => CaptureSession.create(order));
+      _created.add(session.dir);
+      final picked = await _real(
+        tester,
+        () => _pickedFiles(['IMG_A.jpg', 'IMG_B.jpg', 'IMG_C.jpg']),
+      );
+      ImagePickerPlatform.instance = _FakePickerPlatform.gallery([picked]);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: CameraPage(
+            session: session,
+            settingsNotifier: ValueNotifier(_settings(batch: false)),
+            processor: const _CopyProcessor(),
+            source: CaptureSource.gallery,
+          ),
+        ),
+      );
+      await _ioSettle(
+        tester,
+        () => find.byType(PreviewPage).evaluate().isNotEmpty &&
+            session.shots.length == 3 &&
+            session.shots.every((s) => s.status == ShotStatus.ready),
+      );
+      await tester.pumpAndSettle();
+      return session;
+    }
+
+    testWidgets('3 shots staged by a batch-off multi-pick: single-shot '
+        'presentation — no chip/strip/Add-photo, newest full-screen',
+        (tester) async {
+      final session = await stagedByGallery(tester, '100441');
+      final shots = session.shots.toList();
+
+      // No batch chrome, even with 3 shots staged: no count chip, no strip,
+      // no Add photo — by key as well as by label.
+      expect(find.textContaining('—'), findsNothing,
+          reason: 'no batch count chip — the count lives in the batch chip '
+              'only');
+      expect(find.text('Order: 100441 — 3 photos'), findsNothing);
+      expect(find.text('Order: 100441'), findsOneWidget,
+          reason: "today's plain order chip instead");
+      expect(find.byKey(const Key('thumb_strip')), findsNothing);
+      expect(find.byKey(const Key('add_photo_button')), findsNothing);
+      expect(find.text('Add photo'), findsNothing);
+      expect(find.byKey(const Key('upload_all_button')), findsNothing);
+
+      // The NEWEST shot fills the screen — the default selection, exactly
+      // the single-shot review's behavior over a multi-pick session.
+      expect(_fullScreenFile(tester).path, shots.last.localPath,
+          reason: 'the newest of the three is the reviewed shot');
+
+      // The ordinary single-shot row, labels verbatim.
+      expect(find.text('Retake'), findsOneWidget);
+      expect(find.text('Upload'), findsOneWidget);
+    });
+
+    testWidgets('Retake with 3 staged drops ONLY the newest, re-launches '
+        'the camera on the SAME session, and the re-pick reuses slot 003',
+        (tester) async {
+      final session = await _real(tester, () => _sessionOf('100442', 3));
+      final shots = session.shots.toList();
+      final picked = await _real(tester, () => _pickedFile('IMG_D.jpg'));
+      // The retake re-pick is HELD while the camera page is observable.
+      final picker = _FakePickerPlatform([_FakePickerPlatform.heldPick]);
+      ImagePickerPlatform.instance = picker;
+      await _pumpPreview(
+        tester,
+        session: session,
+        batch: false,
+        // The copy processor must ride the whole loop: the retake camera
+        // inherits THIS page's processor, and the re-pick has to land READY
+        // for the full-screen assertion below.
+        processor: const _CopyProcessor(),
+      );
+
+      // The newest shot's full-screen decode was started one pump ago and
+      // takes a few real-time rounds to land (~150 ms in the test engine).
+      // It MUST land before Retake deletes the file: a codec read of a
+      // since-deleted file surfaces as an image-resource error and fails
+      // the test on timing alone. (In production the operator has seconds
+      // on the review screen before pressing Retake — this wait is that
+      // review time.) The image cache's own status is the observable: the
+      // entry leaves `pending` for `keepAlive` once decoded.
+      await _ioSettle(
+        tester,
+        () {
+          final s = PaintingBinding
+              .instance.imageCache.statusForKey(FileImage(File(shots[2].localPath)));
+          return !s.pending && s.keepAlive;
+        },
+        reason: "the retaken shot's full-screen decode must land before its "
+            'file is deleted',
+      );
+
+      await tester.tap(find.text('Retake'));
+      expect(session.shots, [shots[0], shots[1]],
+          reason: 'removeLast is synchronous — only the newest shot goes');
+
+      await _ioSettle(
+        tester,
+        () => find.byType(CameraPage).evaluate().isNotEmpty,
+      );
+
+      // The same session continues (Retake never discards the first two).
+      final pushed = tester.widget<CameraPage>(find.byType(CameraPage));
+      expect(identical(pushed.session, session), isTrue,
+          reason: 'the camera is re-launched on the SAME session');
+      expect(pushed.source, CaptureSource.camera,
+          reason: 'retake is camera-only — the batch toggle plays no part');
+      expect(picker.multiOptions, isEmpty,
+          reason: 'no gallery multi-pick fires — retake reopens the camera');
+      expect(session.shots.map((s) => s.fileName).toList(),
+          [shots[0].fileName, shots[1].fileName],
+          reason: 'the survivors keep their reserved names');
+      expect(File(shots[0].localPath).existsSync(), isTrue);
+      expect(File(shots[1].localPath).existsSync(), isTrue);
+      expect(File(shots[2].localPath).existsSync(), isFalse,
+          reason: 'the retaken shot is gone from disk too');
+
+      // The re-pick lands in the freed slot: 3 staged again, numbered 003.
+      picker.held.single.resolve(picked.path);
+      await _ioSettle(
+        tester,
+        () => find.byType(PreviewPage).evaluate().isNotEmpty &&
+            session.shots.length == 3 &&
+            session.shots.every((s) => s.status == ShotStatus.ready),
+      );
+      await tester.pumpAndSettle();
+
+      expect(session.shots.last.fileName, matches(RegExp(r'_003\.png$')),
+          reason: 'the re-pick reuses the freed slot — 003 again');
+      expect(
+        session.shots.take(2).map((s) => s.fileName).toList(),
+        [shots[0].fileName, shots[1].fileName],
+        reason: 'the first two are unchanged by the round trip',
+      );
+      expect(_fullScreenFile(tester).path, session.shots.last.localPath,
+          reason: 'the fresh review presents the newly admitted (last) shot');
+    });
+
+    testWidgets('Upload with 3 READY staged: the injected uploader receives '
+        'the session and ALL THREE, in session order', (tester) async {
+      final session = await _real(tester, () => _sessionOf('100443', 3));
+      final shots = session.shots.toList();
+      final fake = _FakeUploader()..next.add(_summary(shots));
+      await _pumpPreview(
+        tester,
+        session: session,
+        batch: false,
+        uploader: fake.call,
+      );
+
+      await tester.tap(find.text('Upload'));
+      await tester.pump();
+
+      expect(fake.sessions, [session]);
+      expect(fake.onlys, hasLength(1), reason: 'one uploader call, one pass');
+      expect(fake.onlys.single, shots,
+          reason: 'the ordinary Upload button already sends EVERY READY '
+              'shot — the `only:` subset IS the whole ready session, no new '
+              'logic needed');
+      expect(
+        fake.onlys.single!.map((s) => s.fileName).toList(),
+        [shots[0].fileName, shots[1].fileName, shots[2].fileName],
+        reason: 'in session order',
+      );
+      expect(
+        fake.onlys.single!.every((s) => s.status == ShotStatus.ready),
+        isTrue,
+      );
+      expect(find.textContaining('Uploaded:'), findsOneWidget,
+          reason: "today's single-shot done shape, naming the last shot");
+    });
+  });
+
   group('CameraPage admission', () {
     testWidgets('failed conversion: pending entry admitted, flagged FAILED '
         'at review — the flow never abandons', (tester) async {
