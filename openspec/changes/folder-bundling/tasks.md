@@ -37,9 +37,9 @@
 
 ## 6. Verification & docs
 
-- [ ] 6.1 Device pass across all four toggle combinations end-to-end; PNG conversion with EXIF-orientation check (decision point: swap `ImageProcessor` to pure-Dart `image` if the plugin misbehaves — design D4 fallback); induced-failure retry-remaining on hardware
+- [x] 6.1 Device pass across all four toggle combinations end-to-end; PNG conversion with EXIF-orientation check (decision point: swap `ImageProcessor` to pure-Dart `image` if the plugin misbehaves — design D4 fallback); induced-failure retry-remaining on hardware (operator-confirmed across the 6.4–6.12 re-passes; the D4 fallback was never needed)
 - [x] 6.2 CLAUDE.md updates: filename contract (new scheme + legacy note), "no resize/compression" line superseded by quality settings, architecture map post-split, app name OrderPic
-- [ ] 6.3 Full `flutter analyze` + `flutter test` green; final review of implementation against the six delta specs
+- [x] 6.3 Full `flutter analyze` + `flutter test` green; final review of implementation against the six delta specs (analyze clean, 145/145; review recorded in verify.md)
 - [x] 6.4 (user-directed, from 6.1 device pass) Tappable thumbnails: tapping a strip thumbnail swaps the full-screen preview to that shot (view any batch shot, not just the last)
 - [x] 6.5 (user-directed, from 6.1 device pass) CameraPage becomes a transient launching state; backing out of the system camera cancels the capture and pops back to the scanner; the idle "Take a photo" screen with the manual Open camera button is removed
 - [x] 6.6 (user-directed, from 6.1 device pass) Background PNG conversion: after a pick the shot appears as a pending thumbnail immediately; conversions run concurrently with capture; processing failures are flagged at review time for retake; Upload all waits for pending conversions
