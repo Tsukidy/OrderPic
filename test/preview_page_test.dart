@@ -1460,6 +1460,74 @@ void main() {
       );
     });
 
+    testWidgets('batch OFF runs the SAME gallery path: 3 picks stage '
+        '001/002/003 with ONE hand-off to review (nothing MAY be gated on '
+        'the batch toggle)', (tester) async {
+      // The pin: no part of the gallery leg may branch on upload.batchMode.
+      // Same script, same processor, same assertions as the batch-on suite
+      // above — only the settings differ. A future `batchMode` check in the
+      // gallery path (e.g. treating batch OFF as single-pick, or bailing to
+      // the cancel exit) fails here.
+      final session = await _real(
+        tester,
+        () => CaptureSession.create('100438'),
+      );
+      _created.add(session.dir);
+      final picked = await _real(
+        tester,
+        () => _pickedFiles(['IMG_A.jpg', 'IMG_B.jpg', 'IMG_C.jpg']),
+      );
+      final picker = _FakePickerPlatform.gallery([picked]);
+      final processor = _PairRecordingProcessor();
+      final nav = _NavRecorder();
+      ImagePickerPlatform.instance = picker;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          navigatorObservers: [nav],
+          home: CameraPage(
+            session: session,
+            settingsNotifier: ValueNotifier(_settings(batch: false)),
+            processor: processor,
+            source: CaptureSource.gallery,
+          ),
+        ),
+      );
+
+      await _ioSettle(
+        tester,
+        () => find.byType(PreviewPage).evaluate().isNotEmpty &&
+            session.shots.length == 3 &&
+            session.shots.every((s) => s.status == ShotStatus.ready),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(PreviewPage), findsOneWidget,
+          reason: 'batch OFF still hands off to review after a multi-pick');
+      expect(find.byType(CameraPage), findsNothing);
+      expect(nav.replaces, 1,
+          reason: 'exactly ONE hand-off with the toggle off, as with it on');
+      expect(picker.multiOptions, hasLength(1),
+          reason: 'still ONE multi-pick call — the toggle gates nothing');
+
+      final names = session.shots.map((s) => s.fileName).toList();
+      expect(names[0], matches(RegExp(r'^100438_\d{8}_\d{6}_001\.png$')));
+      expect(names[1], matches(RegExp(r'^100438_\d{8}_\d{6}_002\.png$')));
+      expect(names[2], matches(RegExp(r'^100438_\d{8}_\d{6}_003\.png$')),
+          reason: 'the batch-on reserved numbering, unchanged by the toggle');
+
+      expect(
+        [for (final p in processor.pairs) p.picked],
+        picked,
+        reason: 'every returned file admitted exactly once, in sheet order',
+      );
+      expect(
+        [for (final p in processor.pairs) File(p.dest).existsSync()],
+        [true, true, true],
+        reason: 'every admission converted — nothing half-admitted',
+      );
+    });
+
     testWidgets('pick-time params follow the SAME jpegPickParams mapping the '
         'camera path uses — no maxHeight, no limit', (tester) async {
       final session = await _real(
@@ -1571,8 +1639,7 @@ void main() {
         _MultiPickThrow(
           PlatformException(code: 'photo_access_denied'),
         ),
-      ]
-      );
+      ]);
 
       await tester.pumpWidget(shellWithGallery(session));
       await tester.pump(); // post-frame push
