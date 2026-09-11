@@ -86,7 +86,19 @@ Future<File> _pickedFile(String name) async {
   return File('${scratch.path}/$name')..writeAsBytesSync(_pngBytes);
 }
 
-AppSettings _settings({required bool batch}) => AppSettings(
+/// [names.length] scratch "picked" files, in the order the gallery sheet
+/// would return them.
+Future<List<String>> _pickedFiles(List<String> names) async => [
+  for (final name in names) (await _pickedFile(name)).path,
+];
+
+/// [format]/[jpegQuality] default to this file's working PNG shape; the
+/// gallery params test overrides them to pin the JPEG preset mapping.
+AppSettings _settings({
+  required bool batch,
+  ImageFormat format = ImageFormat.png,
+  JpegQuality jpegQuality = JpegQuality.original,
+}) => AppSettings(
   connection: const ConnectionSettings(
     host: '192.0.2.1',
     sharePath: '/zdrive/InvoiceData',
@@ -94,7 +106,11 @@ AppSettings _settings({required bool batch}) => AppSettings(
     username: '',
     password: '',
   ),
-  upload: UploadPrefs(batchMode: batch, format: ImageFormat.png),
+  upload: UploadPrefs(
+    batchMode: batch,
+    format: format,
+    jpegQuality: jpegQuality,
+  ),
 );
 
 /// The seam shape PreviewPage expects: the extra named parameters mirror
@@ -238,12 +254,42 @@ class _FakePickerPlatform extends ImagePickerPlatform {
   /// Sentinel script entry: hold the pick open until released.
   static const String heldPick = '__held__';
 
-  _FakePickerPlatform(this.pickedPaths);
+  /// Sentinel multi-pick script entry: hold the gallery sheet open until
+  /// released — the "picker is up" state [heldPick] provides for the
+  /// camera, resolved through [heldMulti].
+  static const List<String> heldMultiPick = <String>['__held-multi__'];
+
+  /// The camera-shaped script (the existing single-pick suites stay
+  /// positional; empty = every pick behaves as "user backed out").
+  _FakePickerPlatform([this.pickedPaths = const <String?>[]])
+    : multiPicks = const <Object>[];
+
+  /// The gallery-shaped script: one entry per multi-pick call, nothing for
+  /// the camera — a gallery test reads as the whole story of its launch.
+  _FakePickerPlatform.gallery(this.multiPicks)
+    : pickedPaths = const <String?>[];
 
   final List<String?> pickedPaths;
+
+  /// Gallery multi-pick script, one entry per [ImagePicker.pickMultiImage]
+  /// call. An entry is either a list of canned picked paths in sheet order
+  /// (an EMPTY list is the real plugin's cancel shape — the sheet closed
+  /// with nothing selected), [heldMultiPick], or a [_MultiPickThrow]. An
+  /// exhausted script degrades to that same empty list, so a scriptless
+  /// fake stays safe for a gallery push (the single-pick script's
+  /// post-exhaustion null, gallery twin).
+  final List<Object> multiPicks;
+
   final List<_HeldPick> held = [];
+  final List<_HeldMultiPick> heldMulti = [];
+
+  /// The options every multi-pick call received — the pick-time params the
+  /// page forwarded (the JPEG preset's quality/edge caps travel inside
+  /// [MultiImagePickerOptions.imageOptions]).
+  final List<MultiImagePickerOptions> multiOptions = [];
 
   int _calls = 0;
+  int _multiCalls = 0;
 
   @override
   Future<XFile?> getImageFromSource({
@@ -264,6 +310,50 @@ class _FakePickerPlatform extends ImagePickerPlatform {
     }
     return path == null ? null : XFile(path);
   }
+
+  /// [ImagePicker.pickMultiImage]'s delegate in
+  /// image_picker_platform_interface 2.11.1 — the exact method the app's
+  /// gallery path drives, so overriding it (and only it) keeps the fake on
+  /// the real code path. The older `getMultiImage` stays unimplemented on
+  /// purpose: if the page ever drifts off `pickMultiImage`, the test fails
+  /// loudly instead of silently faking a different call.
+  @override
+  Future<List<XFile>> getMultiImageWithOptions({
+    MultiImagePickerOptions options = const MultiImagePickerOptions(),
+  }) async {
+    multiOptions.add(options);
+    final Object entry = _multiCalls < multiPicks.length
+        ? multiPicks[_multiCalls++]
+        : const <String>[];
+    if (identical(entry, heldMultiPick)) {
+      final h = _HeldMultiPick();
+      heldMulti.add(h);
+      return h.completer.future;
+    }
+    if (entry is _MultiPickThrow) throw entry.error;
+    return <XFile>[for (final path in entry as List<String>) XFile(path)];
+  }
+}
+
+/// The release handle for a [heldMultiPick] script entry: the "gallery
+/// sheet is up" state, resolved by the test.
+class _HeldMultiPick {
+  final completer = Completer<List<XFile>>();
+
+  /// The sheet came back with these files, in selection order.
+  void resolve(List<String> paths) =>
+      completer.complete(<XFile>[for (final p in paths) XFile(p)]);
+
+  /// The sheet came back with nothing (the real plugin's cancel shape).
+  void cancel() => completer.complete(const <XFile>[]);
+}
+
+/// Multi-pick script entry: the platform call itself throws — the gallery
+/// twin of [_CrashingPickerPlatform], but scriptable per call.
+class _MultiPickThrow {
+  const _MultiPickThrow(this.error);
+
+  final Object error;
 }
 
 /// The release handle for a [heldPick] script entry: the "system camera is
@@ -289,6 +379,39 @@ class _CrashingPickerPlatform extends ImagePickerPlatform {
     code: 'camera_error',
     message: 'camera_in_use',
   );
+}
+
+/// Counts route replaces — the only way to see a STRAY second hand-off to
+/// review: two stacked `pushReplacement`s leave a single PreviewPage in the
+/// tree, which `findsOneWidget` cannot distinguish.
+class _NavRecorder extends NavigatorObserver {
+  int replaces = 0;
+
+  @override
+  void didReplace({Route<dynamic>? newRoute, Route<dynamic>? oldRoute}) =>
+      replaces += 1;
+}
+
+/// [_CopyProcessor] plus a record of every (picked → reserved dest) pair in
+/// call order. The gallery picks in these tests are byte-identical, so the
+/// pairing — not the file bytes — is the evidence that each returned file
+/// was admitted exactly once, in sheet order.
+class _PairRecordingProcessor implements ImageProcessor {
+  // Not const: the recorded pairs are per-instance mutable state (a const
+  // constructor would force a constant field initializer).
+  _PairRecordingProcessor();
+
+  final List<({String picked, String dest})> pairs = [];
+
+  @override
+  Future<void> process({
+    required String pickedPath,
+    required String destPath,
+  }) async {
+    // Recorded BEFORE the await: record order IS admission call order.
+    pairs.add((picked: pickedPath, dest: destPath));
+    await File(pickedPath).copy(destPath);
+  }
 }
 
 void main() {
@@ -1234,6 +1357,273 @@ void main() {
       await _ioSettle(tester, () => !session.dir.existsSync());
       expect(session.dir.existsSync(), isFalse,
           reason: 'no staged shots → dir reclaimed');
+    });
+  });
+
+  group('CameraPage gallery source', () {
+    // Task 2.1: the SAME transient page launched with the gallery source.
+    // Everything below rides the existing admission/exit machinery — the
+    // only new behavior is the multi-pick launch, the loop admitting every
+    // returned file, and the single hand-off to review.
+
+    /// Shell stand-in for the two-way exit tests — the same stub-first-
+    /// route shape the transient group's shellWithCamera builds, launched
+    /// straight into the gallery.
+    Widget shellWithGallery(
+      CaptureSession session, {
+      ImageProcessor processor = const _CopyProcessor(),
+    }) {
+      return MaterialApp(
+        home: Builder(
+          builder: (context) {
+            // Push the camera once the first frame exists — _startCapture's
+            // `await Navigator.push(...)` shape.
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => CameraPage(
+                    session: session,
+                    settingsNotifier: ValueNotifier(_settings(batch: true)),
+                    processor: processor,
+                    source: CaptureSource.gallery,
+                  ),
+                ),
+              );
+            });
+            return const Scaffold(body: Text('SHELL'));
+          },
+        ),
+      );
+    }
+
+    testWidgets('multi-pick of 3 → 3 staged shots numbered 001/002/003 in '
+        'sheet order, ONE hand-off to review', (tester) async {
+      final session = await _real(
+        tester,
+        () => CaptureSession.create('100438'),
+      );
+      _created.add(session.dir);
+      final picked = await _real(
+        tester,
+        () => _pickedFiles(['IMG_A.jpg', 'IMG_B.jpg', 'IMG_C.jpg']),
+      );
+      final picker = _FakePickerPlatform.gallery([picked]);
+      final processor = _PairRecordingProcessor();
+      final nav = _NavRecorder();
+      ImagePickerPlatform.instance = picker;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          navigatorObservers: [nav],
+          home: CameraPage(
+            session: session,
+            settingsNotifier: ValueNotifier(_settings(batch: true)),
+            processor: processor,
+            source: CaptureSource.gallery,
+          ),
+        ),
+      );
+
+      await _ioSettle(
+        tester,
+        () => find.byType(PreviewPage).evaluate().isNotEmpty &&
+            session.shots.length == 3 &&
+            session.shots.every((s) => s.status == ShotStatus.ready),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(PreviewPage), findsOneWidget);
+      expect(find.byType(CameraPage), findsNothing);
+      // Exactly ONE navigation event may follow the launch: a stray second
+      // hand-off (or an _exit + hand-off double-fire) replaces another
+      // route — replacing the already-replaced review leaves ONE PreviewPage
+      // in the tree, invisible to findsOneWidget.
+      expect(nav.replaces, 1, reason: 'review is handed to exactly once');
+      expect(picker.multiOptions, hasLength(1),
+          reason: 'ONE multi-pick call — not one per file');
+
+      final names = session.shots.map((s) => s.fileName).toList();
+      expect(names[0], matches(RegExp(r'^100438_\d{8}_\d{6}_001\.png$')));
+      expect(names[1], matches(RegExp(r'^100438_\d{8}_\d{6}_002\.png$')));
+      expect(names[2], matches(RegExp(r'^100438_\d{8}_\d{6}_003\.png$')),
+          reason: 'indexes advance 001, 002, 003 across the returned list');
+
+      expect(
+        [for (final p in processor.pairs) p.picked],
+        picked,
+        reason: 'each returned file admitted EXACTLY once, in sheet order',
+      );
+      expect(
+        [for (final p in processor.pairs) File(p.dest).existsSync()],
+        [true, true, true],
+        reason: 'every admission converted — nothing half-admitted',
+      );
+    });
+
+    testWidgets('pick-time params follow the SAME jpegPickParams mapping the '
+        'camera path uses — no maxHeight, no limit', (tester) async {
+      final session = await _real(
+        tester,
+        () => CaptureSession.create('100438'),
+      );
+      _created.add(session.dir);
+      final picked = await _real(tester, () => _pickedFiles(['IMG_A.jpg']));
+      final picker = _FakePickerPlatform.gallery([picked]);
+      ImagePickerPlatform.instance = picker;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: CameraPage(
+            session: session,
+            settingsNotifier: ValueNotifier(
+              // balanced = quality 80 + 2560 long-edge cap — the exact
+              // numbers pickImage receives for the same preset today.
+              _settings(
+                batch: true,
+                format: ImageFormat.jpeg,
+                jpegQuality: JpegQuality.balanced,
+              ),
+            ),
+            processor: const _CopyProcessor(),
+            source: CaptureSource.gallery,
+          ),
+        ),
+      );
+
+      await _ioSettle(
+        tester,
+        () => find.byType(PreviewPage).evaluate().isNotEmpty,
+      );
+
+      expect(picker.multiOptions, hasLength(1));
+      final options = picker.multiOptions.single;
+      expect(options.imageOptions.imageQuality, 80);
+      expect(options.imageOptions.maxWidth, 2560.0,
+          reason: 'the preset cap travels as maxWidth — a long-edge cap, '
+              'exactly as the single-pick call sends it');
+      expect(options.imageOptions.maxHeight, isNull,
+          reason: "today's pick call sends NO maxHeight — neither may the "
+              'gallery one');
+      expect(options.limit, isNull,
+          reason: 'no cap on how many photos the operator picks');
+    });
+
+    testWidgets('empty multi-pick with STAGED SHOTS returns to review with '
+        'the batch intact (the real plugin cancel shape)', (tester) async {
+      final session = await _real(tester, () => _sessionOf('100438', 2));
+      final shots = session.shots.toList();
+      ImagePickerPlatform.instance =
+          _FakePickerPlatform.gallery([const <String>[]]);
+
+      await tester.pumpWidget(shellWithGallery(session));
+      await tester.pump(); // post-frame push
+      await _ioSettle(
+        tester,
+        () => find.byType(PreviewPage).evaluate().isNotEmpty,
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(CameraPage), findsNothing);
+      expect(find.byType(PreviewPage), findsOneWidget);
+      expect(find.text('Order: 100438 — 2 photos'), findsOneWidget,
+          reason: 'a sheet closed with nothing selected is cancelling — '
+              'the staged batch must survive untouched');
+      expect(File(shots[0].localPath).existsSync(), isTrue);
+      expect(File(shots[1].localPath).existsSync(), isTrue);
+      expect(session.shots, hasLength(2));
+    });
+
+    testWidgets('empty multi-pick with an EMPTY session pops to the shell '
+        'and reclaims the session dir', (tester) async {
+      final session = await _real(
+        tester,
+        () => CaptureSession.create('100438'),
+      );
+      _created.add(session.dir);
+      ImagePickerPlatform.instance =
+          _FakePickerPlatform.gallery([const <String>[]]);
+
+      await tester.pumpWidget(shellWithGallery(session));
+      await tester.pump(); // post-frame push
+      await _ioSettle(
+        tester,
+        () => find.byType(CameraPage).evaluate().isEmpty &&
+            find.text('SHELL').evaluate().isNotEmpty,
+      );
+
+      expect(find.byType(PreviewPage), findsNothing,
+          reason: 'nothing was staged, so there is no review to return to');
+      expect(find.text('SHELL'), findsOneWidget,
+          reason: 'cancel with nothing staged returns to the scanner');
+      await _ioSettle(tester, () => !session.dir.existsSync());
+      expect(session.dir.existsSync(), isFalse,
+          reason: 'empty session dir reclaimed on cancel (no leak)');
+    });
+
+    testWidgets('multi-pick crash abandons to the shell with the gallery '
+        'error snackbar (session empty)', (tester) async {
+      final session = await _real(
+        tester,
+        () => CaptureSession.create('100438'),
+      );
+      _created.add(session.dir);
+      ImagePickerPlatform.instance = _FakePickerPlatform.gallery([
+        _MultiPickThrow(
+          PlatformException(code: 'photo_access_denied'),
+        ),
+      ]
+      );
+
+      await tester.pumpWidget(shellWithGallery(session));
+      await tester.pump(); // post-frame push
+      await _ioSettle(
+        tester,
+        () =>
+            find.byType(SnackBar).evaluate().isNotEmpty &&
+            find.text('SHELL').evaluate().isNotEmpty &&
+            find.byType(CameraPage).evaluate().isEmpty,
+      );
+      await tester.pump(const Duration(milliseconds: 400)); // transition
+
+      expect(find.textContaining('Gallery failed:'), findsOneWidget);
+      expect(find.byType(CameraPage), findsNothing);
+      expect(find.text('SHELL'), findsOneWidget,
+          reason: 'the crash abandons the flow — the camera leg contract, '
+              'unchanged for the gallery');
+      await _ioSettle(tester, () => !session.dir.existsSync());
+      expect(session.dir.existsSync(), isFalse,
+          reason: 'no staged shots → dir reclaimed');
+    });
+
+    testWidgets('launch caption follows the source: "Opening gallery…" '
+        'while the sheet is in flight', (tester) async {
+      final session = await _real(
+        tester,
+        () => CaptureSession.create('100438'),
+      );
+      _created.add(session.dir);
+      final picker = _FakePickerPlatform.gallery([
+        _FakePickerPlatform.heldMultiPick,
+      ]);
+      ImagePickerPlatform.instance = picker;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: CameraPage(
+            session: session,
+            settingsNotifier: ValueNotifier(_settings(batch: true)),
+            source: CaptureSource.gallery,
+          ),
+        ),
+      );
+      await tester.pump(); // the gallery route builds, sheet in flight
+
+      expect(find.text('Order: 100438'), findsOneWidget);
+      expect(find.text('Opening gallery…'), findsOneWidget,
+          reason: 'the launch caption names the source actually opening');
+      expect(find.text('Opening camera…'), findsNothing);
+      expect(picker.heldMulti, hasLength(1),
+          reason: 'the sheet is still in flight — nothing has settled');
     });
   });
 
