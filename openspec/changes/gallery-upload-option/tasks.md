@@ -11,8 +11,8 @@
 
 ## 3. Capture-start source choice (scanner dialogs)
 
-- [ ] 3.1 QR confirm dialog grows the second positive action: `Rescan` / `Take photo` (filled) / `Gallery` (tonal); either confirm runs `_startCapture` with the chosen source — session creation, scanner stop/resume, and `_processing` handling unchanged; widget tests in `test/home_page_test.dart`-style harness for both confirm actions launching the matching source
-- [ ] 3.2 Manual entry dialog: `Cancel` / `Take photo` / `Gallery`, both confirms behind the existing empty-value gate and digits-only input; widget tests for both confirm actions and the shared gate
+- [x] 3.1 QR confirm dialog grows the second positive action: `Rescan` / `Take photo` (filled) / `Gallery` (tonal); either confirm runs `_startCapture` with the chosen source — session creation, scanner stop/resume, and `_processing` handling unchanged; widget tests in `test/home_page_test.dart`-style harness for both confirm actions launching the matching source
+- [x] 3.2 Manual entry dialog: `Cancel` / `Take photo` / `Gallery`, both confirms behind the existing empty-value gate and digits-only input; widget tests for both confirm actions and the shared gate
 
 ## 4. Review source sheet (add + continue)
 
