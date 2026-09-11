@@ -222,18 +222,20 @@ class _PreviewPageState extends State<PreviewPage> {
     );
   }
 
-  /// Back to the camera for the SAME session. [removeLast] is true only for
-  /// Retake (drop the newest shot, delete its file — that shot never
-  /// happened, [CaptureSession.nextIndex] rolls back with it); Add photo
-  /// keeps every staged shot. Either way the session survives, so shot
-  /// numbering and the batch keep accumulating.
+  /// Back to the camera for the SAME session — Retake's path only (design
+  /// D10: retake is camera-only). [removeLast] drops the newest shot and
+  /// deletes its file — that shot never happened, [CaptureSession.nextIndex]
+  /// rolls back with it — so the session survives and the numbering keeps
+  /// accumulating. Add photo goes through [_pickSource] instead (source
+  /// choice first); its same-session leg repeats the disarm-and-push shape
+  /// below once a source was actually chosen.
   ///
   /// Retaking a PENDING last shot is the cancel path: the entry goes now
   /// and the in-flight conversion cleans up after itself when it finds its
   /// entry gone ([admitPicked]'s settle step). A FAILED last shot likewise
   /// drops its (nonexistent) file without ceremony.
   Future<void> _openCamera({required bool removeLast}) async {
-    // Retake/Add during the upload gate: leaving review while conversions
+    // Retake during the upload gate: leaving review while conversions
     // still run means there is no one waiting — clear the gate so the
     // settle never fires an upload into a page that has moved on.
     if (_status == _UploadStatus.waiting) _status = _UploadStatus.idle;
@@ -247,6 +249,69 @@ class _PreviewPageState extends State<PreviewPage> {
     _selectedIndex = null;
     if (!mounted) return;
     await _pushCamera();
+  }
+
+  /// The Add-photo source choice (design D4): the next photos are SHOT with
+  /// the system camera or PICKED from the gallery's multi-select sheet. The
+  /// choice is a bottom sheet, not a third button in an action row — the
+  /// narrow-screen contract keeps those rows at Retake / Add photo / the
+  /// gated or upload button, and a 360dp screen has no room for a fourth
+  /// sibling (documented row overflow, see [_bottomButtons]).
+  ///
+  /// Opening the sheet changes nothing and navigates nowhere; DISMISSING it
+  /// (barrier tap, back gesture) is a full no-op — the armed upload gate
+  /// stays armed and the pinned thumbnail stays pinned. So the state changes
+  /// below happen only once a choice was made, at the moment navigation
+  /// actually happens — never while the sheet is merely open.
+  ///
+  /// [freshSession] is Task 4.2's leg: the done-state continuations (More
+  /// for this order / Another photo (same order)) will come through here
+  /// and start a brand-new session with the chosen source. No caller
+  /// reaches that branch yet.
+  Future<void> _pickSource({required bool freshSession}) async {
+    final source = await showModalBottomSheet<CaptureSource>(
+      context: context,
+      builder: _sourceSheet,
+    );
+    // Null = dismissed: nothing at all happens.
+    if (source == null || !mounted) return;
+    if (freshSession) {
+      // Task 4.2 turns this branch on (CaptureSession.create + push with
+      // [source]); deliberately inert today — nothing calls it.
+      return;
+    }
+    // Same-session Add photo: the exact state [_openCamera] leaves behind
+    // for its push, applied now that a source was actually chosen.
+    if (_status == _UploadStatus.waiting) _status = _UploadStatus.idle;
+    _selectedIndex = null;
+    await _pushCamera(source);
+  }
+
+  /// The two answers the sheet offers. The labels are the operator-facing
+  /// contract ("Choose from gallery" — not the bare "Gallery" the scanner
+  /// dialogs use — because this choice is about the NEXT photos, not the
+  /// whole flow's source); the keys are the tests' handles.
+  Widget _sourceSheet(BuildContext sheetContext) {
+    return SafeArea(
+      key: const Key('source_sheet'),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ListTile(
+            key: const Key('sheet_take_photo'),
+            leading: const Icon(Icons.photo_camera),
+            title: const Text('Take photo'),
+            onTap: () => Navigator.of(sheetContext).pop(CaptureSource.camera),
+          ),
+          ListTile(
+            key: const Key('sheet_gallery'),
+            leading: const Icon(Icons.photo_library),
+            title: const Text('Choose from gallery'),
+            onTap: () => Navigator.of(sheetContext).pop(CaptureSource.gallery),
+          ),
+        ],
+      ),
+    );
   }
 
   /// Retake of ONE flagged (failed-conversion) entry — not necessarily the
@@ -272,13 +337,16 @@ class _PreviewPageState extends State<PreviewPage> {
     return null;
   }
 
-  Future<void> _pushCamera() {
+  /// [source] defaults to the camera so the Retake callers below stay
+  /// verbatim; [_pickSource]'s same-session leg forwards the chosen source.
+  Future<void> _pushCamera([CaptureSource source = CaptureSource.camera]) {
     return Navigator.of(context).pushReplacement(
       MaterialPageRoute(
         builder: (_) => CameraPage(
           session: widget.session,
           settingsNotifier: widget.settingsNotifier,
           processor: widget.processor,
+          source: source,
         ),
       ),
     );
@@ -746,7 +814,7 @@ class _PreviewPageState extends State<PreviewPage> {
                 key: const Key('add_photo_button'),
                 icon: Icons.add_a_photo,
                 label: 'Add photo',
-                onPressed: () => _openCamera(removeLast: false),
+                onPressed: () => _pickSource(freshSession: false),
               ),
               // The only squeezable child: on a narrow screen the two fixed
               // buttons can leave less room than the label needs — the
@@ -863,7 +931,7 @@ class _PreviewPageState extends State<PreviewPage> {
                 key: const Key('add_photo_button'),
                 icon: Icons.add_a_photo,
                 label: 'Add photo',
-                onPressed: () => _openCamera(removeLast: false),
+                onPressed: () => _pickSource(freshSession: false),
               ),
               if (pending)
                 // Same narrow-screen squeeze as the waiting row above.

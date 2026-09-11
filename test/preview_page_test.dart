@@ -163,9 +163,11 @@ Future<void> _pumpPreview(
   required bool batch,
   _Uploader? uploader,
   ImageProcessor processor = const _CopyProcessor(),
+  NavigatorObserver? nav,
 }) async {
   await tester.pumpWidget(
     MaterialApp(
+      navigatorObservers: [?nav],
       home: PreviewPage(
         session: session,
         settingsNotifier: ValueNotifier(_settings(batch: batch)),
@@ -711,6 +713,237 @@ void main() {
       expect(_fullScreenFile(tester).path, session.shots.last.localPath,
           reason: 'the fresh preview presents the NEW last shot — the '
               'pinned selection was review-time state only');
+    });
+  });
+
+  group('PreviewPage Add-photo source sheet (batch on)', () {
+    // Task 4.1: Add photo no longer jumps straight to the camera — it asks
+    // WHERE the next photos come from first (design D4). The choice is a
+    // bottom sheet, NOT a new button in an action row: the narrow-screen
+    // contract keeps those rows at Retake / Add photo / the gated or upload
+    // button, and a 360dp screen has no room for a fourth sibling. Opening
+    // the sheet must change nothing and navigate nowhere; DISMISSING it
+    // (barrier tap, back gesture) is a full no-op; only a made choice may
+    // disarm the gate, reset the selection and push.
+
+    testWidgets('Add photo opens the sheet in place: no navigation, no '
+        'state change', (tester) async {
+      final session = await _real(tester, () => _sessionOf('100438', 2));
+      final shots = session.shots.toList();
+      // Scriptless on purpose: if the sheet round-trip launched anything,
+      // the fake would answer "backed out" — visible below as a replace.
+      final picker = _FakePickerPlatform([]);
+      ImagePickerPlatform.instance = picker;
+      final nav = _NavRecorder();
+      await _pumpPreview(tester, session: session, batch: true, nav: nav);
+
+      await tester.tap(find.byKey(const Key('add_photo_button')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('source_sheet')), findsOneWidget);
+      expect(find.byKey(const Key('sheet_take_photo')), findsOneWidget);
+      expect(find.byKey(const Key('sheet_gallery')), findsOneWidget);
+      expect(find.text('Take photo'), findsOneWidget);
+      expect(find.text('Choose from gallery'), findsOneWidget);
+
+      // A question, not a launch: the review page is still the route, no
+      // camera was pushed, nothing was replaced and no picker call fired.
+      expect(find.byType(PreviewPage), findsOneWidget);
+      expect(find.byType(CameraPage), findsNothing);
+      expect(nav.replaces, 0);
+      expect(picker.held, isEmpty);
+      expect(picker.multiOptions, isEmpty);
+      expect(session.shots, shots,
+          reason: 'opening the sheet stages nothing and drops nothing');
+      expect(find.text('Order: 100438 — 2 photos'), findsOneWidget);
+    });
+
+    testWidgets('choosing Take photo pushes the SAME-session camera with '
+        'the staged batch intact', (tester) async {
+      final session = await _real(tester, () => _sessionOf('100438', 2));
+      final shots = session.shots.toList();
+      final picked = await _real(tester, () => _pickedFile('IMG_0003.jpg'));
+      // The camera pick is HELD so the pushed page stays observable — the
+      // real system camera behaves the same way (the pick settles on
+      // return).
+      final picker = _FakePickerPlatform([_FakePickerPlatform.heldPick]);
+      ImagePickerPlatform.instance = picker;
+      final nav = _NavRecorder();
+      await _pumpPreview(tester, session: session, batch: true, nav: nav);
+
+      await tester.tap(find.byKey(const Key('add_photo_button')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('sheet_take_photo')));
+      await _ioSettle(
+        tester,
+        () => find.byType(CameraPage).evaluate().isNotEmpty,
+      );
+
+      expect(find.text('Opening camera…'), findsOneWidget,
+          reason: 'the same-session camera leg Add photo used to push '
+              'directly');
+      expect(session.shots, shots,
+          reason: 'add keeps every staged shot — nothing was removed or '
+              'renamed by the choice');
+      expect(File(shots[0].localPath).existsSync(), isTrue);
+      expect(File(shots[1].localPath).existsSync(), isTrue);
+
+      // The launch is a real one on the SAME session: the new shot
+      // continues the numbering (003) and the hand-off to review is the
+      // ordinary single replace.
+      expect(picker.held, hasLength(1));
+      picker.held.single.resolve(picked.path);
+      await _ioSettle(
+        tester,
+        () => find.byType(PreviewPage).evaluate().isNotEmpty &&
+            session.shots.length == 3 &&
+            session.shots.every((s) => s.status == ShotStatus.ready),
+      );
+      await tester.pumpAndSettle();
+
+      expect(session.shots.last.fileName, matches(RegExp(r'_003\.png$')));
+      expect(nav.replaces, 2,
+          reason: 'both hand-offs are replaces: preview → camera (the '
+              'choice) and camera → review (the admission)');
+    });
+
+    testWidgets('choosing Choose from gallery multi-picks into the SAME '
+        'session with continuing indexes', (tester) async {
+      final session = await _real(tester, () => _sessionOf('100438', 2));
+      final shots = session.shots.toList();
+      final picked = await _real(
+        tester,
+        () => _pickedFiles(['IMG_0003.jpg', 'IMG_0004.jpg']),
+      );
+      final picker = _FakePickerPlatform.gallery([picked]);
+      final processor = _PairRecordingProcessor();
+      ImagePickerPlatform.instance = picker;
+      final nav = _NavRecorder();
+      await _pumpPreview(
+        tester,
+        session: session,
+        batch: true,
+        nav: nav,
+        processor: processor,
+      );
+
+      await tester.tap(find.byKey(const Key('add_photo_button')));
+      await tester.pumpAndSettle();
+      expect(picker.multiOptions, isEmpty,
+          reason: 'the sheet alone launches nothing');
+
+      await tester.tap(find.byKey(const Key('sheet_gallery')));
+      await _ioSettle(
+        tester,
+        () => find.byType(PreviewPage).evaluate().isNotEmpty &&
+            session.shots.length == 4 &&
+            session.shots.every((s) => s.status == ShotStatus.ready),
+      );
+      await tester.pumpAndSettle();
+
+      expect(picker.multiOptions, hasLength(1),
+          reason: 'the choice fired exactly ONE multi-pick');
+      expect(find.byType(CameraPage), findsNothing);
+      expect(nav.replaces, 2,
+          reason: 'both hand-offs are replaces: preview → camera (the '
+              'choice) and camera → review (the admission)');
+      expect(session.shots.sublist(0, 2), shots,
+          reason: 'the staged batch is untouched — the picks join it');
+      expect(session.shots[2].fileName, matches(RegExp(r'_003\.png$')),
+          reason: 'numbering continues from where the session stood: '
+              '2 staged + a 2-pick → 003');
+      expect(session.shots[3].fileName, matches(RegExp(r'_004\.png$')));
+      expect(
+        [for (final p in processor.pairs) p.picked],
+        picked,
+        reason: 'each returned file admitted exactly once, in sheet order',
+      );
+      for (final s in session.shots.sublist(2)) {
+        expect(File(s.localPath).existsSync(), isTrue,
+            reason: '${s.fileName} was converted into the session dir');
+      }
+    });
+
+    testWidgets('dismissing the sheet is a full no-op: the armed upload '
+        'gate survives, selection and batch untouched', (tester) async {
+      final session = await _real(tester, () => _sessionOf('100438', 1));
+      final ready = session.shots.single;
+      final gate = Completer<void>();
+      final picked = await _real(tester, () => _pickedFile('IMG_0002.jpg'));
+
+      // A pending conversion plus an ARMED gate — the state in which a
+      // stray disarm would silently kill the auto-upload the operator
+      // already asked for (the settle would find nobody waiting).
+      final admission = admitPicked(
+        pickedPath: picked.path,
+        prefs: _settings(batch: true).upload,
+        session: session,
+        processor: _HeldProcessor(gate),
+      );
+      final fake = _FakeUploader()
+        ..next.add(_summary([
+          ready,
+          admission.pending.copyWith(status: ShotStatus.ready),
+        ]));
+      final nav = _NavRecorder();
+      await _pumpPreview(
+        tester,
+        session: session,
+        batch: true,
+        uploader: fake.call,
+        nav: nav,
+      );
+
+      // Pin the FIRST thumbnail: the selection is review-time state whose
+      // survival across the dismissal is part of the no-op contract.
+      final stripTiles = find.descendant(
+        of: find.byKey(const Key('thumb_strip')),
+        matching: find.byType(GestureDetector),
+      );
+      await tester.tap(stripTiles.first);
+      await tester.pump();
+      expect(_fullScreenFile(tester).path, ready.localPath);
+
+      // Arm the gate: the operator asked for the upload to start the moment
+      // the pending conversion settles — exactly what a stray disarm during
+      // the sheet round-trip would silently kill.
+      await tester.tap(find.byKey(const Key('waiting_button')));
+      await tester.pump();
+
+      await tester.tap(find.byKey(const Key('add_photo_button')));
+      // Plain pumps, not pumpAndSettle: the pending tile's spinner never
+      // settles while the conversion is held open.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400)); // sheet transition
+      expect(find.byKey(const Key('source_sheet')), findsOneWidget);
+      expect(find.text('Waiting… (1)'), findsOneWidget,
+          reason: 'the gate stays armed while the sheet is open');
+
+      // Barrier tap = dismissal: the sheet answers null.
+      await tester.tapAt(const Offset(20, 20));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(find.byKey(const Key('source_sheet')), findsNothing);
+      expect(find.byType(PreviewPage), findsOneWidget);
+      expect(find.byType(CameraPage), findsNothing);
+      expect(nav.replaces, 0, reason: 'a dismissal navigates nowhere');
+      expect(find.text('Waiting… (1)'), findsOneWidget,
+          reason: 'the gate was NOT disarmed by the sheet round-trip');
+      expect(_fullScreenFile(tester).path, ready.localPath,
+          reason: 'the pinned selection was not reset');
+      expect(session.shots, hasLength(2),
+          reason: 'nothing was staged or dropped by opening + dismissing');
+      expect(fake.sessions, isEmpty);
+
+      // And the armed gate still works: when the held conversion settles,
+      // the upload the operator armed must auto-start.
+      gate.complete();
+      await _ioSettle(
+        tester,
+        () => find.text('Uploaded 2 photos').evaluate().isNotEmpty,
+      );
+      expect(fake.sessions, [session]);
     });
   });
 
