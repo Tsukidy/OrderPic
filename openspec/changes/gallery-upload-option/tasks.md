@@ -16,7 +16,7 @@
 
 ## 4. Review source sheet (add + continue)
 
-- [ ] 4.1 Batch-on "Add photo" opens a modal bottom sheet — Take photo / Choose from gallery — then pushes `CameraPage` with the chosen source on the SAME session (no retake-rollback); widget tests: sheet appears, camera choice preserves staged shots, gallery choice admits into the same session with continuing indexes
+- [x] 4.1 Batch-on "Add photo" opens a modal bottom sheet — Take photo / Choose from gallery — then pushes `CameraPage` with the chosen source on the SAME session (no retake-rollback); widget tests: sheet appears, camera choice preserves staged shots, gallery choice admits into the same session with continuing indexes
 - [ ] 4.2 Done-state continuations open the same sheet before creating the fresh session: "More for this order" (batch on) and "Another photo (same order)" (batch off); either source starts `CaptureSession.create(orderNumber)` and pushes the chosen source; widget tests for both rows × both sources
 - [ ] 4.3 Single-shot multi-pick through the existing review: with batch off, a session holding 3 gallery picks shows the newest full-screen with no batch chip/strip/Add-photo, Retake drops only the newest, Upload uploads all READY shots (existing `_uploadAll` covers it — assert via injected uploader); the done-state sheet from 4.2 is the only single-shot gallery re-entry point
 
