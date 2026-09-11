@@ -409,6 +409,135 @@ void main() {
     expect(dirsAfter.length, dirsBefore.length,
         reason: 'no session dir was born — the flow never started');
   });
+
+  testWidgets('manual entry: Take photo confirm starts the camera flow when '
+      'the field holds digits', (tester) async {
+    final picker = _HeldPickPlatform();
+    ImagePickerPlatform.instance = picker;
+
+    await _pumpScanner(tester);
+    await tester.tap(find.text('Type order number'));
+    await tester.pumpAndSettle(); // the entry dialog opens
+    expect(find.text('Order number'), findsOneWidget);
+
+    await tester.enterText(find.byType(TextField), '100438');
+    await tester.pumpAndSettle(); // the gate re-enables both confirms
+    await tester.tap(find.text('Take photo'));
+    await tester.pump(); // pop the dialog, start the session create
+    await _ioSettle(
+      tester,
+      () => find.byType(CameraPage).evaluate().isNotEmpty,
+    );
+    await tester.pump(const Duration(milliseconds: 400)); // push transition
+
+    expect(find.byType(CameraPage), findsOneWidget);
+    expect(find.text('Order: 100438'), findsOneWidget,
+        reason: 'the typed number reached the flow');
+    expect(find.text('Opening camera…'), findsOneWidget,
+        reason: 'Take photo launches the CAMERA source');
+    expect(picker.sources.single, ImageSource.camera);
+    expect(picker.heldMulti, isEmpty, reason: 'no gallery call on this path');
+
+    // Unwind (backing out of the system camera cancels back to the
+    // scanner), so no session dir leaks past teardown.
+    picker.held.single.complete(null);
+    await _ioSettle(
+      tester,
+      () => find.byType(CameraPage).evaluate().isEmpty,
+    );
+    await tester.pump(const Duration(milliseconds: 400)); // pop transition
+  });
+
+  testWidgets('manual entry: Gallery confirm starts the gallery flow when '
+      'the field holds digits', (tester) async {
+    final picker = _HeldPickPlatform();
+    ImagePickerPlatform.instance = picker;
+
+    await _pumpScanner(tester);
+    await tester.tap(find.text('Type order number'));
+    await tester.pumpAndSettle(); // the entry dialog opens
+    expect(find.text('Order number'), findsOneWidget);
+
+    await tester.enterText(find.byType(TextField), '100438');
+    await tester.pumpAndSettle(); // the gate re-enables both confirms
+    await tester.tap(find.text('Gallery'));
+    await tester.pump(); // pop the dialog, start the session create
+    await _ioSettle(
+      tester,
+      () => find.byType(CameraPage).evaluate().isNotEmpty,
+    );
+    await tester.pump(const Duration(milliseconds: 400)); // push transition
+
+    expect(find.byType(CameraPage), findsOneWidget);
+    expect(find.text('Order: 100438'), findsOneWidget,
+        reason: 'the typed number reached the flow');
+    expect(find.text('Opening gallery…'), findsOneWidget,
+        reason: 'Gallery launches the GALLERY source');
+    expect(picker.heldMulti, hasLength(1),
+        reason: 'the gallery multi-pick is in flight');
+    expect(picker.sources, isEmpty,
+        reason: 'a gallery launch never touches the camera pick');
+
+    // Unwind: the sheet comes back empty (the real plugin's cancel shape)
+    // and the still-empty session is reclaimed.
+    picker.heldMulti.single.complete(const <XFile>[]);
+    await _ioSettle(
+      tester,
+      () => find.byType(CameraPage).evaluate().isEmpty,
+    );
+    await tester.pump(const Duration(milliseconds: 400)); // pop transition
+  });
+
+  testWidgets('manual entry: both confirms stay disabled while the field is '
+      'empty', (tester) async {
+    await _pumpScanner(tester);
+    await tester.tap(find.text('Type order number'));
+    await tester.pumpAndSettle(); // the entry dialog opens
+
+    // The gate is the trimmed-empty check on the shared controller — BOTH
+    // confirms sit behind it, so both must be disabled right now.
+    FilledButton confirmOf(String label) => tester.widget<FilledButton>(
+          find.widgetWithText(FilledButton, label),
+        );
+    expect(confirmOf('Take photo').onPressed, isNull,
+        reason: 'empty field keeps Take photo disabled');
+    expect(confirmOf('Gallery').onPressed, isNull,
+        reason: 'empty field keeps Gallery disabled');
+
+    // Belt and braces: tapping them starts nothing either way.
+    await tester.tap(find.text('Take photo'));
+    await tester.tap(find.text('Gallery'));
+    await tester.pumpAndSettle();
+    expect(find.byType(CameraPage), findsNothing);
+    expect(find.byType(TextField), findsOneWidget,
+        reason: 'the dialog is still open — nothing was confirmed');
+  });
+
+  testWidgets('manual entry: Cancel starts nothing and the entry dialog can '
+      'be reopened (the flow lock is released)', (tester) async {
+    await _pumpScanner(tester);
+    await tester.tap(find.text('Type order number'));
+    await tester.pumpAndSettle(); // the entry dialog opens
+    await tester.enterText(find.byType(TextField), '100438');
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(TextField), findsNothing,
+        reason: 'the dialog is dismissed');
+    expect(find.byType(CameraPage), findsNothing,
+        reason: 'no capture flow was pushed');
+    expect(find.text('Order: 100438'), findsNothing,
+        reason: 'no order chip anywhere — nothing started');
+
+    // The cancel path resets _processing: the entry dialog refuses to open
+    // while a flow owns it, so reopening is the observable proof.
+    await tester.tap(find.text('Type order number'));
+    await tester.pumpAndSettle();
+    expect(find.byType(TextField), findsOneWidget,
+        reason: 'the scanner is usable again after Cancel');
+  });
 }
 
 /// The `mmcpic-session-*` dirs currently under the system temp — the "no

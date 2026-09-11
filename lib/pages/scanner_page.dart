@@ -237,13 +237,16 @@ class _ScannerPageState extends State<ScannerPage>
 
   /// Fallback entry: type an order number when the QR code won't scan.
   /// `_processing` suppresses barcode detection while the dialog is open;
-  /// confirming starts the same capture flow a scanned code does.
+  /// confirming starts the same capture flow a scanned code does — Take
+  /// photo through the system camera, Gallery through the multi-pick.
   Future<void> _showEntryDialog() async {
     if (_processing) return;
     _processing = true;
     _entryController.clear();
 
-    final confirmed = await showDialog<bool>(
+    // Same output shape as the QR dialog: WHICH source launches, or null
+    // for Cancel/dismiss.
+    final confirmed = await showDialog<CaptureSource>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Type order number'),
@@ -262,18 +265,19 @@ class _ScannerPageState extends State<ScannerPage>
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
+            onPressed: () => Navigator.of(context).pop(null),
             child: const Text('Cancel'),
           ),
-          ValueListenableBuilder<TextEditingValue>(
-            valueListenable: _entryController,
-            builder: (context, value, _) => FilledButton(
-              // Disabled while the trimmed value is empty.
-              onPressed: value.text.trim().isEmpty
-                  ? null
-                  : () => Navigator.of(context).pop(true),
-              child: const Text('Use this'),
-            ),
+          _entryConfirmAction(
+            context,
+            label: 'Take photo',
+            source: CaptureSource.camera,
+          ),
+          _entryConfirmAction(
+            context,
+            label: 'Gallery',
+            source: CaptureSource.gallery,
+            tonal: true,
           ),
         ],
       ),
@@ -282,14 +286,36 @@ class _ScannerPageState extends State<ScannerPage>
     final orderNumber = _entryController.text.trim();
 
     if (!mounted) return;
-    if (confirmed == true && orderNumber.isNotEmpty) {
-      // Camera for now — the entry dialog's own source choice is the next
-      // task; the parameter is required from here on either way.
-      await _startCapture(orderNumber, source: CaptureSource.camera);
+    if (confirmed != null && orderNumber.isNotEmpty) {
+      await _startCapture(orderNumber, source: confirmed);
     } else {
       // Cancelled — nothing was pushed, just resume detecting.
       _processing = false;
     }
+  }
+
+  /// One entry-dialog confirm button ([tonal] = the Gallery one). Both
+  /// confirms share THIS gate — the same controller listenable, the same
+  /// trimmed-empty check — because an empty order number must not start a
+  /// flow that names its uploads with no order at all, whichever picker
+  /// launches. Only the popped source differs.
+  Widget _entryConfirmAction(
+    BuildContext dialogContext, {
+    required String label,
+    required CaptureSource source,
+    bool tonal = false,
+  }) {
+    return ValueListenableBuilder<TextEditingValue>(
+      valueListenable: _entryController,
+      builder: (context, value, _) {
+        final onPressed = value.text.trim().isEmpty
+            ? null
+            : () => Navigator.of(dialogContext).pop(source);
+        return tonal
+            ? FilledButton.tonal(onPressed: onPressed, child: Text(label))
+            : FilledButton(onPressed: onPressed, child: Text(label));
+      },
+    );
   }
 
   @override
