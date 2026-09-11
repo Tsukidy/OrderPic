@@ -37,16 +37,40 @@ Future<void> _ioSettle(
 
 /// Picker platform whose picks hang until released: the "system camera is
 /// open" state, resolved by the test (see [held]).
+///
+/// The gallery twin lives here too: [heldMulti] is the "multi-select sheet
+/// is up" state, and [sources] records every single-pick source the page
+/// asked for — the source-choice suites below assert WHICH picker a launch
+/// drove, not just that one was in flight.
 class _HeldPickPlatform extends ImagePickerPlatform {
   final List<Completer<XFile?>> held = [];
+
+  /// The gallery sheet's held multi-picks, resolved by the test.
+  final List<Completer<List<XFile>>> heldMulti = [];
+
+  /// The source of every [getImageFromSource] call, in call order.
+  final List<ImageSource> sources = [];
 
   @override
   Future<XFile?> getImageFromSource({
     required ImageSource source,
     ImagePickerOptions options = const ImagePickerOptions(),
   }) {
+    sources.add(source);
     final c = Completer<XFile?>();
     held.add(c);
+    return c.future;
+  }
+
+  /// [ImagePicker.pickMultiImage]'s delegate — overriding it (and only it)
+  /// keeps the fake on the real gallery code path, the same seam
+  /// preview_page_test fakes.
+  @override
+  Future<List<XFile>> getMultiImageWithOptions({
+    MultiImagePickerOptions options = const MultiImagePickerOptions(),
+  }) {
+    final c = Completer<List<XFile>>();
+    heldMulti.add(c);
     return c.future;
   }
 }
@@ -144,8 +168,13 @@ void Function(BarcodeCapture) _onDetectOf(WidgetTester tester) {
 }
 
 void main() {
+  /// The fake scanner platform installed for the running test — the
+  /// rescan suite counts its starts to prove the scanner resumed.
+  late _FakeScannerPlatform scannerPlatform;
+
   setUp(() {
-    MobileScannerPlatform.instance = _FakeScannerPlatform();
+    scannerPlatform = _FakeScannerPlatform();
+    MobileScannerPlatform.instance = scannerPlatform;
   });
 
   tearDown(() {
@@ -218,7 +247,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('QR code scanned'), findsOneWidget);
 
-    await tester.tap(find.text('Use this'));
+    await tester.tap(find.text('Take photo'));
     await tester.pump(); // pop the dialog, start the session create
     await _ioSettle(
       tester,
@@ -248,6 +277,153 @@ void main() {
     expect(find.text('Scan QR code'), findsOneWidget,
         reason: 'the scanner is back on top');
   });
+
+  testWidgets('QR dialog: Gallery confirm opens the gallery multi-pick — '
+      'the flow launches with the order chip', (tester) async {
+    final picker = _HeldPickPlatform();
+    ImagePickerPlatform.instance = picker;
+
+    await _pumpScanner(tester);
+    final onDetect = _onDetectOf(tester);
+    unawaited(
+      Future.sync(
+        () => onDetect(
+          const BarcodeCapture(barcodes: [Barcode(rawValue: '100438')]),
+        ),
+      ),
+    );
+    await tester.pump(); // confirm dialog starts
+    await tester.pumpAndSettle();
+    expect(find.text('QR code scanned'), findsOneWidget);
+
+    await tester.tap(find.text('Gallery'));
+    await tester.pump(); // pop the dialog, start the session create
+    await _ioSettle(
+      tester,
+      () => find.byType(CameraPage).evaluate().isNotEmpty,
+    );
+    // No pumpAndSettle from here on: the launching spinner is an
+    // indeterminate animation and would never settle.
+    await tester.pump(const Duration(milliseconds: 400)); // push transition
+
+    expect(find.byType(CameraPage), findsOneWidget);
+    expect(find.text('Order: 100438'), findsOneWidget,
+        reason: 'the launching state shows the order chip');
+    expect(find.text('Opening gallery…'), findsOneWidget,
+        reason: 'the GALLERY source drives this launch');
+    expect(picker.heldMulti, hasLength(1),
+        reason: 'the gallery multi-pick is in flight');
+    expect(picker.sources, isEmpty,
+        reason: 'a gallery launch never touches the camera pick');
+
+    // Unwind: the sheet comes back empty (the real plugin's cancel shape) —
+    // the still-empty session is reclaimed and the scanner resumes. Keeps
+    // this test from leaking its held session dir past teardown.
+    picker.heldMulti.single.complete(const <XFile>[]);
+    await _ioSettle(
+      tester,
+      () => find.byType(CameraPage).evaluate().isEmpty,
+    );
+    await tester.pump(const Duration(milliseconds: 400)); // pop transition
+    expect(find.text('Scan QR code'), findsOneWidget,
+        reason: 'the empty sheet cancelled back to the scanner');
+  });
+
+  testWidgets('QR dialog: Take photo confirm opens the system camera — the '
+      'camera-source launch exactly as before the gallery option', (tester) async {
+    final picker = _HeldPickPlatform();
+    ImagePickerPlatform.instance = picker;
+
+    await _pumpScanner(tester);
+    final onDetect = _onDetectOf(tester);
+    unawaited(
+      Future.sync(
+        () => onDetect(
+          const BarcodeCapture(barcodes: [Barcode(rawValue: '100438')]),
+        ),
+      ),
+    );
+    await tester.pump(); // confirm dialog starts
+    await tester.pumpAndSettle();
+    expect(find.text('QR code scanned'), findsOneWidget);
+
+    await tester.tap(find.text('Take photo'));
+    await tester.pump(); // pop the dialog, start the session create
+    await _ioSettle(
+      tester,
+      () => find.byType(CameraPage).evaluate().isNotEmpty,
+    );
+    await tester.pump(const Duration(milliseconds: 400)); // push transition
+
+    expect(find.byType(CameraPage), findsOneWidget);
+    expect(find.text('Order: 100438'), findsOneWidget,
+        reason: 'the launching state shows the order chip');
+    expect(find.text('Opening camera…'), findsOneWidget,
+        reason: 'the CAMERA source drives this launch');
+    expect(picker.sources.single, ImageSource.camera,
+        reason: 'the single pick was asked for the CAMERA source');
+    expect(picker.heldMulti, isEmpty,
+        reason: 'a camera launch never touches the gallery pick');
+
+    // Unwind (as the first camera suite does): backing out of the system
+    // camera cancels back to the scanner.
+    picker.held.single.complete(null);
+    await _ioSettle(
+      tester,
+      () => find.byType(CameraPage).evaluate().isEmpty,
+    );
+    await tester.pump(const Duration(milliseconds: 400)); // pop transition
+    expect(find.text('Scan QR code'), findsOneWidget);
+  });
+
+  testWidgets('QR dialog: Rescan starts nothing — no session dir, no route, '
+      'the scanner resumes', (tester) async {
+    final dirsBefore = await _sessionDirs(tester);
+
+    await _pumpScanner(tester);
+    final startsBefore = scannerPlatform.starts;
+    final onDetect = _onDetectOf(tester);
+    unawaited(
+      Future.sync(
+        () => onDetect(
+          const BarcodeCapture(barcodes: [Barcode(rawValue: '100438')]),
+        ),
+      ),
+    );
+    await tester.pump(); // confirm dialog starts
+    await tester.pumpAndSettle();
+    expect(find.text('QR code scanned'), findsOneWidget);
+
+    await tester.tap(find.text('Rescan'));
+    await tester.pump(); // dialog pops, the dismiss branch runs
+    await tester.pumpAndSettle();
+
+    expect(find.text('QR code scanned'), findsNothing,
+        reason: 'the dialog is dismissed');
+    expect(find.byType(CameraPage), findsNothing,
+        reason: 'no capture flow was pushed');
+    expect(scannerPlatform.starts, startsBefore + 1,
+        reason: 'the scanner restarted after the rescan');
+
+    final dirsAfter = await _sessionDirs(tester);
+    expect(dirsAfter.length, dirsBefore.length,
+        reason: 'no session dir was born — the flow never started');
+  });
+}
+
+/// The `mmcpic-session-*` dirs currently under the system temp — the "no
+/// flow started" evidence: a capture flow is BORN as one of these.
+Future<List<String>> _sessionDirs(WidgetTester tester) async {
+  final dirs = await tester.runAsync(() async {
+    return [
+      for (final e in Directory.systemTemp.listSync())
+        if (e is Directory &&
+            e.uri.pathSegments.where((s) => s.isNotEmpty).last
+                .startsWith(CaptureSession.dirPrefix))
+          e.path,
+    ];
+  });
+  return dirs ?? const <String>[];
 }
 
 /// runAsync wrapper for a one-shot future.

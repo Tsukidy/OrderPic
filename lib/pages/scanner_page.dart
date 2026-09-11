@@ -149,29 +149,41 @@ class _ScannerPageState extends State<ScannerPage>
     await _controller.stop();
     if (!mounted) return;
 
-    final confirmed = await showDialog<bool>(
+    // The dialog's whole output is WHICH source launches: [CaptureSource]
+    // for a confirmed order, null for Rescan/dismiss (the barrier tap too).
+    // It replaced the old bool so the two positives can diverge without a
+    // second round-trip.
+    final confirmed = await showDialog<CaptureSource>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('QR code scanned'),
         content: Text(orderNumber),
         actions: [
           TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
+            onPressed: () => Navigator.of(context).pop(null),
             child: const Text('Rescan'),
           ),
+          // Today's confirm semantics: launch the system camera.
           FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Use this'),
+            onPressed: () => Navigator.of(context).pop(CaptureSource.camera),
+            child: const Text('Take photo'),
+          ),
+          // Tonal, not filled: same "confirm this order" weight, but the
+          // gallery is the secondary way in — the filled button stays the
+          // primary answer to "you scanned a code".
+          FilledButton.tonal(
+            onPressed: () => Navigator.of(context).pop(CaptureSource.gallery),
+            child: const Text('Gallery'),
           ),
         ],
       ),
     );
 
     if (!mounted) return;
-    if (confirmed == true) {
+    if (confirmed != null) {
       // Push the capture flow on top of the tab shell; when it eventually
       // pops (upload finished / cancelled), resume scanning.
-      await _startCapture(orderNumber);
+      await _startCapture(orderNumber, source: confirmed);
     } else {
       _processing = false;
       unawaited(_controller.start());
@@ -186,7 +198,10 @@ class _ScannerPageState extends State<ScannerPage>
   /// numbering. When it empties, the flow reclaims the dir itself
   /// (uploadSession's cleanupIfEmpty / CameraPage's cancel path); shots
   /// still staged at pop are left for the next-launch sweep.
-  Future<void> _startCapture(String orderNumber) async {
+  Future<void> _startCapture(
+    String orderNumber, {
+    required CaptureSource source,
+  }) async {
     await _controller.stop();
     if (!mounted) return;
     final CaptureSession session;
@@ -208,6 +223,7 @@ class _ScannerPageState extends State<ScannerPage>
         builder: (_) => CameraPage(
           session: session,
           settingsNotifier: widget.settingsNotifier,
+          source: source,
         ),
       ),
     );
@@ -267,7 +283,9 @@ class _ScannerPageState extends State<ScannerPage>
 
     if (!mounted) return;
     if (confirmed == true && orderNumber.isNotEmpty) {
-      await _startCapture(orderNumber);
+      // Camera for now — the entry dialog's own source choice is the next
+      // task; the parameter is required from here on either way.
+      await _startCapture(orderNumber, source: CaptureSource.camera);
     } else {
       // Cancelled — nothing was pushed, just resume detecting.
       _processing = false;
