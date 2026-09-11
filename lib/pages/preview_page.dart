@@ -335,9 +335,6 @@ class _PreviewPageState extends State<PreviewPage> {
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-          Positioned.fill(
-            child: _fullScreen(selected, shownPath),
-          ),
           SafeArea(
             child: Column(
               children: [
@@ -361,7 +358,14 @@ class _PreviewPageState extends State<PreviewPage> {
                   ],
                 ),
                 if (_batchOn && !done) _thumbStrip(shots),
-                const Spacer(),
+                // The reviewed shot fills the VISIBLE middle — between the
+                // strip and the bottom controls — so BoxFit.contain centers
+                // it where the operator's eye expects. Centering on the
+                // full screen behind the overlays leaves more visible
+                // letterbox below than above (the top overlay is taller),
+                // which reads as "pushed to the top" for landscape shots
+                // (device finding 6.13).
+                Expanded(child: _fullScreen(selected, shownPath)),
                 if (_failedShots.isNotEmpty && _status != _UploadStatus.uploading)
                   _conversionBanner(),
                 if (_status == _UploadStatus.failed) _errorBanner(),

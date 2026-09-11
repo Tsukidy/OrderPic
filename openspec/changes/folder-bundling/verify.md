@@ -30,11 +30,12 @@ is a placeholder — addressed at archive-time spec sync.
 |---|---|---|
 | — | All 32 tasks ticked (6.1 operator-confirmed across the re-passes; 6.3 completed by this report) | — |
 
-Note: one **cosmetic** device finding is open but intentionally NOT a task
-row yet — see the warning in Overall Decision (landscape image sometimes
-appearing top-pushed; localization detail pending from the operator; static
-analysis of all three image surfaces shows tight constraints everywhere and
-no layout path to a top-push).
+Note: the cosmetic device finding from the first pass (landscape shots
+reading as "pushed to the top" on the review screen) is **resolved as task
+6.13**: the full-screen image now fills the visible band between the
+thumbnail strip and the bottom controls instead of centering on the whole
+screen behind the overlays. Unit-verified with a real 160×90 landscape PNG
+(146/146); visual confirmation rides on the operator's next device pass.
 
 ---
 
