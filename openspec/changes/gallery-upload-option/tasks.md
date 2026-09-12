@@ -24,4 +24,4 @@
 
 - [x] 5.1 Full `flutter analyze && flutter test` green; walk the six delta-spec requirements against the implementation (batch-capture ×3, manual-order-entry ×1, order-folders ×1 scenarios) and note gaps as follow-up tasks, not silent skips
 - [ ] 5.2 Device pass (operator): scan → Gallery → 3-photo multi-pick → review → upload with folders ON (`{share}/{order}/` gets all three) and OFF (flat); single-shot gallery pick; Add photo → gallery mid-batch; camera regression pass (capture start, Add photo, retake, cancel); HEIC sample from gallery with Original preset → uploads as a valid `.jpg`
-- [ ] 5.3 CLAUDE.md updates: capture-flow bullet mentions the gallery source + `CaptureSource` parameter; SMB layer note that gallery shots ride the identical session→upload path; tests section notes the multi-pick picker fake
+- [x] 5.3 CLAUDE.md updates: capture-flow bullet mentions the gallery source + `CaptureSource` parameter; SMB layer note that gallery shots ride the identical session→upload path; tests section notes the multi-pick picker fake
