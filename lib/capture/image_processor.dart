@@ -32,8 +32,11 @@ abstract class ImageProcessor {
   /// Writes [pickedPath]'s PROCESSED bytes to [destPath] — a session-dir
   /// path whose name was already reserved via [reserveShotName]. The
   /// reserved name's extension is the contract: `.png` must produce the
-  /// lossless full-size conversion, anything else the pick-time JPEG
-  /// as-is (quality/edge caps were applied by image_picker).
+  /// lossless full-size conversion, `.jpg` the JPEG bytes — byte-copied
+  /// when the source already starts with the JPEG magic, re-encoded
+  /// (full size, quality 100) otherwise ([NativeImageProcessor]'s guard:
+  /// gallery picks can arrive non-JPEG under a `.jpg` name). Pick-time
+  /// quality/edge caps were applied by image_picker.
   ///
   /// Throws on failure and never touches the session — admission state
   /// ([ShotStatus.pending] → ready/failed) is [admitPicked]'s job.

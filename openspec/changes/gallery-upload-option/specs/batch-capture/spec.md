@@ -129,7 +129,8 @@ recently staged shot and Upload MUST upload every processed (READY) shot.
 #### Scenario: Retake in a single-shot multi-pick drops only the newest
 
 - **WHEN** a single-shot session holds three gallery-picked shots and the
-  operator taps Retake, then re-picks one gallery photo
+  operator taps Retake, then re-photographs one shot with the camera
+  (Retake stays camera-only)
 - **THEN** the session holds three shots — the first two unchanged plus
   the newly picked one
 
