@@ -99,3 +99,18 @@ No critical issues **except the operator-gated 5.2 device pass**; one
 deliberate process gate, not an implementation defect. All code, spec, and
 doc findings from the final review are fixed and re-reviewed. **Ready for
 archive once 5.2 is performed by the operator or explicitly deferred.**
+
+## Overall Decision
+
+- [ ] ✅ PASS — 可進入 finishing-a-development-branch 與 archive
+- [x] ⚠️ PASS WITH WARNINGS — 可進入後續步驟但需注意：implementation,
+      specs, and docs all pass every check executable in this environment
+      (173/173 tests, analyze clean, final whole-branch review clean after an
+      accepted fix wave); the single open item is the operator-gated 5.2
+      device pass — archive waits on the operator performing it (or
+      explicitly deferring)
+- [ ] ❌ FAIL — 返回失敗的 artifact 修正後重跑 verify
+
+**下一步**：operator performs Task 5.2 on this branch (folders ON/OFF
+upload, single-shot gallery pick, mid-batch gallery add, camera regression,
+HEIC sample) → then retrospective → archive → PR.
