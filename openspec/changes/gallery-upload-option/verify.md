@@ -102,15 +102,16 @@ archive once 5.2 is performed by the operator or explicitly deferred.**
 
 ## Overall Decision
 
-- [ ] ✅ PASS — 可進入 finishing-a-development-branch 與 archive
-- [x] ⚠️ PASS WITH WARNINGS — 可進入後續步驟但需注意：implementation,
-      specs, and docs all pass every check executable in this environment
-      (173/173 tests, analyze clean, final whole-branch review clean after an
-      accepted fix wave); the single open item is the operator-gated 5.2
-      device pass — archive waits on the operator performing it (or
-      explicitly deferring)
+- [x] ✅ PASS — 可進入 finishing-a-development-branch 與 archive
+- [ ] ⚠️ PASS WITH WARNINGS — 可進入後續步驟但需注意：`<說明>`
 - [ ] ❌ FAIL — 返回失敗的 artifact 修正後重跑 verify
 
-**下一步**：operator performs Task 5.2 on this branch (folders ON/OFF
-upload, single-shot gallery pick, mid-batch gallery add, camera regression,
-HEIC sample) → then retrospective → archive → PR.
+> **Update 2026-09-18**: the operator performed the device pass on this
+> branch and reports the gallery upload working ("it appears the gallery
+> upload is working fine"); Task 5.2 marked done with that provenance —
+> the individual checklist rows (folders ON/OFF, single-shot pick,
+> mid-batch add, camera regression, HEIC/Original sample) were not
+> itemized in the report. This resolves the earlier PASS-WITH-WARNINGS
+> state (whose sole warning was the then-pending 5.2).
+
+**下一步**：archive → merge to main (operator-directed).
