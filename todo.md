@@ -1,0 +1,1 @@
+Add "Recent Scans" Button alongside "Type order Number".
